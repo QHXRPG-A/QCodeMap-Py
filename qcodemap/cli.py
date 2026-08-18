@@ -41,9 +41,11 @@ def main(argv=None):
     sub = ap.add_subparsers(dest='cmd', required=True)
 
     p_build = sub.add_parser('build', help='（增量）建索引')
-    p_build.add_argument('--root', default=None)
-    p_build.add_argument('--targets', default=None, help='逗号分隔目录，覆盖 custom 配置')
-    p_build.add_argument('--db', default=None)
+    p_build.add_argument('--root', default=None, help='被分析项目根目录')
+    p_build.add_argument('--targets', default=None,
+                         help='只索引这些顶层目录（逗号分隔，如 src,lib），'
+                              '跳过 tests/docs 等无关目录；不传则 ROOT 全量')
+    p_build.add_argument('--db', default=None, help='索引库路径（缺省 cache/qcodemap.db）')
     p_build.add_argument('--rebuild', action='store_true', help='删库重建')
 
     p_callers = sub.add_parser('callers', help='谁调用这个函数')

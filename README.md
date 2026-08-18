@@ -31,6 +31,8 @@ cd QCodeMap
 
 # 建索引：首次在 custom/ 写项目档案（见 custom/README.md），
 # 或直接用参数对任意 Python 目录开扫（万文件级全量约 3.5 分钟；日常增量亚秒）
+# --targets：只索引项目根下这些顶层目录（逗号分隔，如 src,lib = src/ + lib/），
+# 用于跳过 tests/docs/产物等无关目录；不传则 ROOT 全量扫描
 python -m qcodemap build --root /path/to/your/project --targets src,lib
 
 # 谁调用这个函数（VERIFIED=语义验证边 / CANDIDATE=同名候选）
