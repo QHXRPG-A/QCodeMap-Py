@@ -2,91 +2,91 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.x-blue.svg)](https://www.python.org/downloads/) [![Dependencies](https://img.shields.io/badge/dependencies-0-pure%20stdlib-success.svg)]() [![MCP](https://img.shields.io/badge/MCP-14_tools-blueviolet.svg)]() [![Version](https://img.shields.io/badge/version-v0.9-orange.svg)]()
 
-面向任意 Python 代码库的**语义级代码导航索引**：把框架动态语义（组件注入、
-声明式属性、运行时全局注入等习语）数据化为 SQLite 事实表，配倒排索引与
-两阶段查询，提供秒级、可信、与源码物理分离的调用链查询。
+面向 Python 代码库（尤其是大型、重框架的项目）的**语义级导航索引**：把代码里的
+定义、调用，连同框架特有的动态写法（组件注入、声明式属性、运行时注入的全局
+对象），统统扫进一个 SQLite 索引库，配上倒排索引和两阶段查询——「谁调用它 /
+它调了谁 / 改它影响谁」这类问题秒级出答案，结果可信，而且完全不碰源码。
 
-QCodeMap 不试图理解你的代码、推断架构，也不替你决定什么相关——那是
-LLM 和工程师的工作。
+QCodeMap 不试图理解你的代码、推断架构，也不替你判断哪些相关——那是
+LLM 和工程师的事。它只做一件事：
 
-QCodeMap 只为一件事而存在：
-
-> 让每一次「谁调用它 / 它调了谁 / 改它影响谁」，快到可以随手做，准到可以直接信。
+> 让每一次「谁调用它 / 它调了谁 / 改它影响谁」，快到可以随手查，准到可以直接信。
 
 [快速上手](#-快速上手) • [工作原理](#工作原理) • [命令](#命令) • [MCP Server](#-mcp-server) • [实测数据](#-实测数据) • [对比](#与替代方案对比)
 
 ![QCodeMap 源码索引与 AI Agent 工作流](docs/qcodemap-framework.svg)
 
-## 问题
+## 解决什么问题
 
-大型 Python 代码库里的代码调查是迭代式的：想一个问题 → 检索一下 → 读代码 →
-再想 → 再检索。贵的不是思考，是每一次检索。
+大代码库里查代码是绕圈子的：提出一个问题 → 检索 → 读代码 → 冒出新的问题 →
+再检索。费时间的不是思考，是每一步检索。
 
-没有趁手工具时，你只有这些选择：
+手头没有趁手的工具时，选择只有这么几个：
 
-- **grep**：只认字符串不认语义；同名函数、镜像目录带来大量噪音；
-  答不了「改这个函数影响谁」
-- **codemap CLI**：依赖分析只有 import 级、无调用链；万文件库上全仓
-  `--deps` 触发 ast-grep 30 秒超时
-- **jedi + 类型桩**：大库上跨文件边被 30 文件解析安全阀静默丢弃，
-  单查询 12~17 秒；且 `.pyi` 桩必须与源码同目录，无法物理分离
+- **grep**：只认字符串不认语义，同名函数、镜像目录带来大量噪音，答不了
+  「改这个函数影响谁」
+- **codemap CLI**：依赖分析只到 import 级，没有调用链；万文件库上全仓
+  `--deps` 会触发 ast-grep 30 秒超时
+- **jedi + 类型桩**：大库上跨文件的调用边会被 30 文件解析上限悄悄丢弃，
+  单次查询 12~17 秒；`.pyi` 桩还必须和源码放在同一目录，没法分开管理
 
-更深的根因：重框架的 Python 项目存在大量**动态语义**——组件注入是
-setattr 拷贝（不进 MRO）、全局对象是运行时注入、属性是声明式注册。
-通用工具天生看不懂这些习语；jedi 配桩能部分解决，但桩被「与源码同目录」
-的规则锁死。
+更深一层的原因：重度使用框架的 Python 项目里有大量**动态写法**——组件注入
+靠 setattr 拷贝（不进 MRO）、全局对象在运行时注入、属性靠声明式注册。
+通用工具天生看不懂这些；jedi 配桩能解决一部分，但桩被「与源码同目录」
+这条规则锁死。
 
-## 洞察
+## 核心思路
 
-代码调查不需要更聪明的工具，需要**更便宜、更可信的查表**。
+查代码这件事，缺的不是更聪明的工具，而是**开销更低、结果更可靠的查询**。
 
-把「找引用」从每次现扫全仓，变成查询一张预先建好的事实表；把框架习语
-从与源码绑定的类型桩，降格为索引库里可再生的数据行——同样的调查流程，
+把「找引用」从每次都现扫全仓，变成查一张事先建好的索引库；把原本绑在源码
+上的类型桩知识，变成索引库里随时可以重建的数据行。调查流程不变，
 每一步都快一个数量级。
 
-瓶颈不是智能，是检索成本与结果可信度。
+瓶颈不在分析能力，在检索开销和结果的可信度。
 
-## QCodeMap 是什么（与不是）
+## 定位：是什么，不是什么
 
 ### ✅ 是
 
-- 一个把代码库（含框架动态语义）索引成 SQLite 事实表的静态索引
-- 秒级调用链 / RPC / 事件配对 / 变更影响面查询
-- 让 LLM 与工程师直接跳到「精确文件 + 行号区间」的导航层
-- 输出带 `VERIFIED` / `CANDIDATE` 分级，零假边优先
+- 一个静态索引工具：把代码库（连同框架的动态写法）扫进 SQLite
+- 秒级给出调用链、RPC / 事件双端配对、变更影响面
+- 给 LLM 和工程师用的导航层：直接定位到文件和行号区间
+- 结果分级标注（`VERIFIED` / `CANDIDATE`），宁可漏报不误报
 
 ### ❌ 不是
 
-- 不是语义分析器或架构推断引擎
-- 不是 IDE（没有补全、重构执行）
-- 不是运行时探针（纯静态，不跑你的代码）
-- 不替你决定什么相关——那是使用者的事
+- 不是语义分析器，也不是架构推断引擎
+- 不是 IDE（没有补全、重构）
+- 不在运行时插桩（纯静态，不运行你的代码）
+- 不替你判断哪些代码相关——这是使用者自己的事
 
-## 这如何改变代码调查
+## 效果对比
 
-### 没有 QCodeMap
+### 用 grep
 
 ```
 grep "GetTeammateInfo"
 → 大量命中：同名函数、镜像目录、注释全在列
-→ 人工逐个开文件确认
-→ 组件注入边、运行时注入对象看不出来，漏判风险自负
+→ 只能人工逐个开文件确认
+→ 组件注入、运行时注入的对象看不出来，漏判风险自负
 ```
 
-### 有 QCodeMap
+### 用 QCodeMap
 
 ```
 qcodemap callers src/logic/avatar.py GetTeammateInfo
-→ 亚秒返回：每条边带 VERIFIED/CANDIDATE 分级与目标定义行号
-→ 框架习语（组件 / RPC / 事件）由 custom/ 钩子解释
-→ 拿不准可以逐级放大：边 → 片段 → 整文件
+→ 亚秒返回：每条边标注 VERIFIED/CANDIDATE，带目标定义行号
+→ 组件 / RPC / 事件这类框架写法由 custom/ 钩子解释
+→ 拿不准可以逐级放大：边 → 片段 → 整个文件
 ```
 
-同样的推理，同样的结论，检索从分钟级降到亚秒级，且每条边可溯源。
+同样的推理过程，同样的结论，检索从分钟级降到亚秒级，而且每条结果都能
+回溯到源码。
 
 ## 📊 实测数据
 
-孵化案例：约 9000 文件的游戏客户端/服务端代码库（2026-08-18，v0.9）。
+试点项目：约 9000 文件的游戏客户端 / 服务端代码库（2026-08-18，v0.9）。
 
 | 指标 | 数值 |
 | --- | --- |
@@ -97,13 +97,13 @@ qcodemap callers src/logic/avatar.py GetTeammateInfo
 | 语义回归 | 5/5 标准答案边，零假边 |
 | 结构四命令 | 全库各 0.22~0.24s |
 | blast-radius | 2 文件 121 函数冷 43.2s / 热 0.7s（解析器升级后首次冷缓存） |
-| agent 消费面 | find 0.004s / file-context 0.16s / context 0.34s |
+| agent 查询 | find 0.004s / file-context 0.16s / context 0.34s |
 | 懒刷新 | MCP 查询发现 mtime 漂移自动增量 build，单文件级秒内 |
 
 ## ⚡ 快速上手
 
-纯标准库（ast / sqlite3 / re），clone 即用，零第三方依赖。索引产物在
-`cache/`，可再生，被分析项目零写入（svn/git 无感知）。
+纯标准库（ast / sqlite3 / re），clone 下来就能用，零第三方依赖。索引产物
+放在 `cache/`，随时可以重建，被分析的项目零写入（svn/git 完全无感知）。
 
 ```bash
 cd QCodeMap
@@ -128,18 +128,18 @@ python -m qcodemap callees src/logic/avatar.py RefreshToplogo   # 它调了谁
 python -m qcodemap usages HasSkywing                            # 标识符全仓出现点
 ```
 
-### 框架习语配对
+### RPC 与事件双端配对
 
 ```bash
-# RPC 双端跳转（字符串分发形态，通道与 stub 一并列出）
+# RPC：按字符串分发的方法名，把调用点和 handler 配对（通道与 stub 一并列出）
 python -m qcodemap rpc-refs SetPlayerAimState
 python -m qcodemap rpc-refs ObtainClan --stub ClanStub
 
-# 事件双端配对（订阅 handler ↔ 发布点，事件键 import 归一）
+# 事件：订阅 handler ↔ 发布点配对（事件常量按 import 归一）
 python -m qcodemap pubsub-refs ON_MONEY_DMZ_COIN_CHANGE
 ```
 
-### 结构四件套（codemap 平价，无超时）
+### 结构四件套（对标 codemap，无超时）
 
 ```bash
 python -m qcodemap deps <文件或目录>
@@ -148,7 +148,7 @@ python -m qcodemap hubs --top 25
 python -m qcodemap tree --depth 2
 ```
 
-### 变更影响面（调用链闭包 + import 级双维度）
+### 变更影响面（调用链闭包 + import 级两个维度）
 
 ```bash
 python -m qcodemap blast-radius                        # 默认 svn st 采集变更
@@ -158,41 +158,43 @@ python -m qcodemap blast-radius --mode summary         # 仅计数与层摘要
 python -m qcodemap blast-radius --mode page --section callers --layer 2 --offset 0 --limit 50
 ```
 
-### agent 消费面
+### 面向 AI agent
 
 ```bash
-python -m qcodemap find avatar_scene                 # 模糊路径搜索
-python -m qcodemap file-context src/logic/avatar.py  # 单文件完整消费面打包
-python -m qcodemap context --compact                 # AI 会话冷启动注入
+python -m qcodemap find avatar_scene                 # 模糊搜路径
+python -m qcodemap file-context src/logic/avatar.py  # 单文件信息一次打包
+python -m qcodemap context --compact                 # 新会话开场的项目摘要
 ```
 
 所有命令支持 `--json` 机器可读输出（带 `schema_version` 与 `coverage`；
-ast 解析失败文件会在 coverage 里以 partial 状态透出，不静默残缺）。
-`blast-radius` 的 CLI 默认 `full` 保持兼容；MCP 默认 `summary` 防止大影响面
-撑满上下文，可用 `mode=page, section, layer, offset, limit` 按需取明细。
+ast 解析失败的文件会在 coverage 里标成 partial，不会悄悄缺数据）。
+`blast-radius` 的 CLI 默认 `full` 保持兼容；MCP 默认 `summary`，
+避免一次把海量结果塞满上下文，需要明细时用
+`mode=page, section, layer, offset, limit` 分页取。
 
 ## 工作原理
 
-- 扫描仓库，把每个符号的事实（定义、调用、组件边、RPC / 事件注册）写入
-  SQLite 事实表，配倒排索引
-- 框架习语（setattr 组件注入、运行时全局注入、声明式属性等）经
-  `custom/facts.py` 钩子解释为核心可消费的数据行——**桩知识降格为数据**
-- 查询两阶段：先候选（名字级倒排召回），再语义验证（MRO / 组件边 /
-  数据流 / 返回事实）
-- 索引产物在 `cache/`，与源码物理分离、可再生；MCP 查询发现 mtime
-  漂移自动增量刷新
-- 核心引擎项目无关，项目习语与索引范围全部放在 `custom/` 定制层
-  （仓库仅含模板说明，见 custom/README.md），换项目零改核心
+- 扫描整个仓库，把每个符号的信息（定义、调用、组件边、RPC / 事件注册）
+  写入 SQLite，配上倒排索引
+- 框架特有的写法（setattr 组件注入、运行时全局注入、声明式属性）通过
+  `custom/facts.py` 钩子解释成核心引擎直接能用的数据行——
+  **桩里的知识变成库里的数据**
+- 查询分两步：先按名字倒排召回候选，再做语义验证（MRO / 组件边 /
+  数据流 / 返回值来源）
+- 索引产物在 `cache/`，和源码完全分离、随时可重建；MCP 查询发现 mtime
+  变化会自动增量刷新
+- 核心引擎不认识任何具体项目；项目相关的写法和索引范围都放在 `custom/`
+  定制层（仓库里只带模板说明，见 custom/README.md），换项目不用动核心
 
-无运行时、无注入、不跑你的代码。查询结果是可溯源的事实行，不是猜测。
+没有运行时、没有注入、不运行你的代码。查询结果条条可回溯，不是猜的。
 
-## 输出分级（零误报优先）
+## 输出分级（宁可漏报，不误报）
 
-- `VERIFIED`：语义验证链路（MRO/组件边/数据流/返回事实）落到目标定义
-- `CANDIDATE`：调用形态成立但解析不可达或同名歧义，注明解析到了哪个同名定义
-- `RPC-INFERRED` / `EVENT-INFERRED` / `PROPERTY-INFERRED`：由 custom
-  声明的框架约定推断，保留通道或共同运行时宿主证据，不冒充语义验证
-- 解析不了宁可降级，不给假边
+- `VERIFIED`：语义验证链路（MRO / 组件边 / 数据流 / 返回值）落到了目标定义
+- `CANDIDATE`：调用形态成立但解析不可达，或同名有歧义，会注明解析到了哪个同名定义
+- `RPC-INFERRED` / `EVENT-INFERRED` / `PROPERTY-INFERRED`：按 custom 声明的
+  框架约定推断，保留通道或共同运行时宿主证据，不冒充语义验证
+- 解析不了就降级，不给假边
 
 ## 🔌 MCP Server
 
@@ -200,52 +202,52 @@ ast 解析失败文件会在 coverage 里以 partial 状态透出，不静默残
 python -m qcodemap mcp   # stdio，14 个工具，可注册进任意 MCP 客户端
 ```
 
-注册后，AI agent 的代码调查直接走查表：callers / callees 定位调用链、
-blast-radius 评估影响面、file-context 单文件打包、context 冷启动注入，
-避免整文件读取与反复 grep。
+注册后，AI agent 查代码直接查库：callers / callees 定位调用链、
+blast-radius 评估影响面、file-context 打包单文件、context 生成开场摘要，
+省得整文件整文件地读、反反复复地 grep。
 
-## 什么时候 QCodeMap 合适
+## 适用场景
 
-- 万文件级 Python 库，context 与耐心都是稀缺资源
-- 重框架习语项目：组件注入、服务定位器、注册表式声明属性
-- AI agent（MCP）接入，需要可信、可分页的代码事实
-- 重构 / 合码前评估变更影响面
+- 万文件级的 Python 库，上下文和耐心都不够用
+- 项目重度依赖框架：组件注入、服务定位器、注册式属性满天飞
+- AI agent（MCP）需要可信、可分页的代码事实
+- 重构 / 合码前评估改动的影响范围
 
-## 什么时候不是它
+## 不适用的场景
 
 - 小项目：直接读完就行
 - 非 Python 代码库
-- 需要运行时真相（这是静态索引）
-- 需要补全、重构执行等完整 IDE 能力
+- 需要运行时的真实行为（这是纯静态索引）
+- 需要补全、重构这类完整 IDE 能力
 
 ## 与替代方案对比
 
 | 能力 | QCodeMap | codemap CLI | jedi + .pyi 桩 | grep |
 | --- | --- | --- | --- | --- |
-| 调用链（callers/callees） | ✅ 语义验证 | ❌ 仅 import 级 | ⚠️ 大库跨文件边静默丢失 | ❌ 字符串匹配 |
-| 框架动态语义 | ✅ custom 钩子插拔 | ❌ | ⚠️ 桩须与源码同目录 | ❌ |
+| 调用链（callers/callees） | ✅ 语义验证 | ❌ 仅 import 级 | ⚠️ 大库跨文件边悄悄丢失 | ❌ 字符串匹配 |
+| 框架动态写法 | ✅ custom 钩子插拔 | ❌ | ⚠️ 桩须与源码同目录 | ❌ |
 | 与源码物理分离 | ✅ | ✅ | ❌ | — |
 | 万文件全仓结构查询 | ✅ 0.22s | ⚠️ 30s 超时 | — | ✅ |
-| 输出可信分级 | ✅ VERIFIED/CANDIDATE | — | ❌ 静默残缺 | ❌ 噪音 |
+| 结果分级标注 | ✅ VERIFIED/CANDIDATE | — | ❌ 悄悄缺数据 | ❌ 噪音 |
 | 依赖 | 纯 stdlib | ast-grep 二进制 | jedi | 无 |
 
-## 设计哲学
+## 设计原则
 
-> 只陈述事实，不冒充理解。解析不了宁可降级，不给假边。
+> 只陈述事实，不冒充理解。解析不了就降级，不给假边。
 
-确定性、可溯源、可再生。它是查询原语，不是框架。
+确定性、可回溯、可重建。它是查询工具，不是框架。
 
 ## 目录结构
 
 ```
-qcodemap/     核心引擎（项目无关）：cli / build / scanner / store / resolve /
+qcodemap/     核心引擎（与项目无关）：cli / build / scanner / store / resolve /
               structure / blast / context / rpc_refs / pubsub_refs /
               mcp_server / hooks / config / defaults
-custom/       项目定制层：config.py（范围）/ facts.py（框架习语钩子）/
-              seeds.py（人工种子）。仓库仅随附 README.md 模板
-tests/        自包含回归套件（test_p4 自建临时库）；锚定孵化案例代码库的
-              回归与 custom/ 项目档案留在本地工作区，不入公开仓库
-cache/        索引产物（447MB，可再生，不入库）
+custom/       项目定制层：config.py（范围）/ facts.py（框架写法钩子）/
+              seeds.py（人工种子）。仓库只随附 README.md 模板
+tests/        自包含回归套件（test_p4 自建临时库）；锚定试点代码库的回归与
+              custom/ 项目档案留在本地工作区，不入公开仓库
+cache/        索引产物（447MB，可重建，不入库）
 docs/         深入文档（见下）
 ```
 
@@ -258,7 +260,7 @@ docs/         深入文档（见下）
 
 ## 维护约定
 
-- 改动后必跑回归（本地工作区，需孵化案例代码库与项目档案在场）：
+- 改动后必跑回归（本地工作区，需试点代码库与项目档案在场）：
   `python tests/test_feasibility.py`（5/5）与
   `python tests/test_scale.py`，动解析器则六个全跑（含 test_p4.py）
 - 解析器行为变更必须 `RESOLVER_VERSION + 1`（resolve.py 顶部），旧缓存自动失效；
@@ -271,7 +273,7 @@ MIT License — 见 [LICENSE](LICENSE)。
 
 ## 致谢
 
-- 结构能力对齐 codemap CLI（v4.4.0，并以其超时为反面基准）
+- 结构四件套对标 codemap CLI v4.4.0，并解决了它在万文件库上超时的问题
 - jedi 桩版 PoC 提供了前期基准（已被本方案取代）
 
-> QCodeMap：瓶颈不是智能，是可信又便宜的事实查询。
+> QCodeMap：把查代码这件事，变得又快又可靠。
