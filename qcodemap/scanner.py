@@ -119,8 +119,11 @@ def _scan_import(stmt, r, rel, mod):
         return
     base = stmt.module or ''
     if stmt.level:
-        # 相对导入：按 level 回退包前缀再拼接
+        # 相对导入：文件模块的「当前包」是其父包（rel 为 __init__.py 时
+        # mod 本身就是包）。level=1 取当前包，每多一级再退一层。
         pkg = mod.split('.')
+        if not rel.endswith('__init__.py'):
+            pkg.pop()
         for _ in range(stmt.level - 1):
             if pkg:
                 pkg.pop()

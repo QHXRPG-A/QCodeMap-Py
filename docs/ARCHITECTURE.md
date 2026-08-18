@@ -148,6 +148,12 @@ self.stubname（rpc 行 stub=NULL，按方法名配对）；全库 1 处变量�
   comp 表只有 host→comp 方向，组件反查宿主声明需走 genv/种子链人工推
 - MCP server 的 qcodemap_build 全量 rebuild 在 server 进程内执行会阻塞
   该连接约 3.5 分钟（工具级可接受，未做进度上报）
+- 函数参数无类型标注时，`store.count(...)` 这类「参数名.方法()」调用
+  无法推导参数类型（设计内边界：不做通用类型系统；模块级 `mod.func()`
+  与 `self.X`、局部变量构造推导均覆盖）
+- 裸项目（无 custom 档案）实测：索引/结构四命令/`mod.func()` 语义链路
+  全部可用；modmap 曾仅取含类文件致纯模块项目静默降级（v5 修复，
+  2026-08-18 发现于 QCodeMap 自索引实验）
 
 ## 7. 回归套件（tests/）
 

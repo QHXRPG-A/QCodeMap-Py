@@ -42,8 +42,10 @@ class Resolver(object):
         self.comp_hosts = {}
         for (h, c, _f) in self.con.execute('SELECT host, comp, comp_file FROM comp'):
             self.comp_hosts.setdefault(h, set()).add(c)
+        # 模块映射基于全部已索引文件：纯模块（无类）项目里 mod.func() 调用
+        # 也要能解析；旧版仅取含类文件的映射在这种项目上整链路静默降级
         self.modmap = {module_of(f): f for (f,) in
-                       self.con.execute('SELECT DISTINCT file FROM classes')}
+                       self.con.execute('SELECT path FROM files')}
         self._tree_cache = {}
         self._imports_cache = {}  # file -> [(module,name,alias)]，候选验证热路径去重 SQL
         # 语义查询缓存：mro_has_method 递归对同 (class,file) 重复查库是百万次级
@@ -445,8 +447,10 @@ def _display(cls, func):
 
 # 语义解析行为版本：消歧规则等改动时 +1，旧缓存边整体失效
 # v2: 同名类并集语义 + 模块级调用解析；v3: 局部变量二级推导加递归深度防线；
-# v4: 行索引化 resolve_call（语义等价，性能重构）
-RESOLVER_VERSION = 4
+# v4: 行索引化 resolve_call（语义等价，性能重构）；
+# v5: modmap 基于全部已索引文件（原仅含类文件）——纯模块项目的
+#     mod.func() 调用从静默降级恢复为可验证
+RESOLVER_VERSION = 5
 
 
 # 内置函数/常见运行时名：callees 收集时的噪音过滤

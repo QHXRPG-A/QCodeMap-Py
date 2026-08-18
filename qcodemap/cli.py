@@ -10,10 +10,28 @@
 
 import argparse
 import json
+import os
 import sys
 
 from qcodemap import build as build_mod
 from qcodemap import config as config_mod
+
+
+def _apply_db_root(cfg, db_override):
+    """查询库 meta 里记的建库 root 回填 cfg（无库/无 meta 静默跳过）。"""
+    import sqlite3
+    path = db_override or cfg.db_path
+    try:
+        con = sqlite3.connect(path)
+        try:
+            row = con.execute(
+                "SELECT value FROM meta WHERE key='root'").fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return
+    if row and os.path.isdir(row[0]):
+        cfg.root = row[0]
 
 
 def main(argv=None):
@@ -113,6 +131,11 @@ def main(argv=None):
     if args.cmd == 'build':
         build_mod.build(cfg, rebuild=args.rebuild)
         return 0
+    # 查询命令：--root 未显式给出时优先用建库时落的 meta.root。
+    # 跨项目场景（--db 指别的库）漏带 --root，默认 cwd 是错的根目录，
+    # 语义验证读源码会 FileNotFoundError
+    if not getattr(args, 'root', None):
+        _apply_db_root(cfg, getattr(args, 'db', None))
     # 结构四命令：不依赖语义解析，直接查表
     if args.cmd in ('deps', 'importers', 'hubs', 'tree'):
         from qcodemap import structure as st
