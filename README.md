@@ -243,7 +243,8 @@ qcodemap/     核心引擎（项目无关）：cli / build / scanner / store / r
               mcp_server / hooks / config / defaults
 custom/       项目定制层：config.py（范围）/ facts.py（框架习语钩子）/
               seeds.py（人工种子）。仓库仅随附 README.md 模板
-tests/        回归套件；部分用例锚定孵化案例项目（需该代码库在场才能复跑）
+tests/        自包含回归套件（test_p4 自建临时库）；锚定孵化案例代码库的
+              回归与 custom/ 项目档案留在本地工作区，不入公开仓库
 cache/        索引产物（447MB，可再生，不入库）
 docs/         深入文档（见下）
 ```
@@ -257,7 +258,8 @@ docs/         深入文档（见下）
 
 ## 维护约定
 
-- 改动后必跑回归：`python tests/test_feasibility.py`（5/5）与
+- 改动后必跑回归（本地工作区，需孵化案例代码库与项目档案在场）：
+  `python tests/test_feasibility.py`（5/5）与
   `python tests/test_scale.py`，动解析器则六个全跑（含 test_p4.py）
 - 解析器行为变更必须 `RESOLVER_VERSION + 1`（resolve.py 顶部），旧缓存自动失效；
   存储结构变更必须 `SCHEMA_VERSION + 1`（store.py 顶部）并 `--rebuild`

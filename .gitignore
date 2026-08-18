@@ -18,6 +18,12 @@ tests/test_callback.py
 tests/test_local_imports.py
 tests/test_pubsub.py
 tests/test_rpc.py
+# 锚定孵化案例代码库的回归（公开环境无法复跑，留本地）
+tests/test_feasibility.py
+tests/test_scale.py
+tests/test_structure.py
+tests/test_blast.py
+tests/test_mcp.py
 tests/original/
 
 # IDE / 系统

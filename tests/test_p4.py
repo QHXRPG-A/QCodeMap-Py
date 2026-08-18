@@ -25,11 +25,11 @@ from qcodemap.config import Config               # noqa: E402
 from qcodemap.store import Store                 # noqa: E402
 
 # 目标文件取自主库真实路径（临时库只建这几个文件，路径假造到同前缀下）
-F_GOOD = 'gclient/gameplay/demo_good.py'
-F_BAD = 'gclient/gameplay/demo_bad.py'
+F_GOOD = 'client/gameplay/demo_good.py'
+F_BAD = 'client/gameplay/demo_bad.py'
 
 GOOD_SRC = '''# -*- coding: utf-8 -*-
-from gclient.gameplay import helper
+from client.gameplay import helper
 
 
 class Demo(object):
@@ -48,13 +48,13 @@ HELPER_SRC = '''def echo():
     return 1
 '''
 
-HELPER = 'gclient/gameplay/helper.py'
+HELPER = 'client/gameplay/helper.py'
 
 
 def _make_cfg(root, db):
     cfg = Config()
     cfg.root = root
-    cfg.targets = ['gclient']
+    cfg.targets = ['client']
     cfg.db_path = db
     cfg.hooks = None
     return cfg
@@ -65,7 +65,7 @@ def main():
     failed = []
     try:
         root = os.path.join(tmp, 'src').replace('\\', '/')
-        os.makedirs(os.path.join(root, 'gclient/gameplay'))
+        os.makedirs(os.path.join(root, 'client/gameplay'))
         for rel, src in ((F_GOOD, GOOD_SRC), (F_BAD, BAD_SRC), (HELPER, HELPER_SRC)):
             with open(os.path.join(root, rel.replace('/', os.sep)), 'w') as f:
                 f.write(src)
@@ -86,7 +86,7 @@ def main():
             if 'ast 解析失败' not in (out.get('note') or ''):
                 failed.append('坏文件定义未找到的 note 应说明 ast 失败: %s'
                               % out.get('note'))
-            cov = st_mod.deps(store, 'gclient/gameplay', json_out=True)['coverage']
+            cov = st_mod.deps(store, 'client/gameplay', json_out=True)['coverage']
             if cov['status'] != 'partial' or 'issues' not in cov:
                 failed.append('deps coverage 应 partial 带 issues: %s' % cov)
             # importers 的 scope 是被引用目标（helper 正常）-> complete；
