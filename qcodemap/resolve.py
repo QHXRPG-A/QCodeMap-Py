@@ -15,7 +15,7 @@ import os
 import time
 import warnings
 
-from qcodemap.scanner import FUNC_NODES, dotted, module_of, read_source
+from qcodemap.scanner import FUNC_NODES, dotted, module_of, read_source, scope_ranges
 from qcodemap.store import Store  # noqa: F401 -- CLI 经本模块取 Store
 
 
@@ -40,18 +40,22 @@ class Resolver(object):
         for (_f, cls, attr, t) in self.con.execute('SELECT file, class, attr, type FROM attr'):
             self.attr_facts[(cls, attr)] = t
         self.comp_hosts = {}
-        for (h, c, _f) in self.con.execute('SELECT host, comp, comp_file FROM comp'):
-            self.comp_hosts.setdefault(h, set()).add(c)
+        self.reverse_components = {}
+        for (h, hf, c, cf) in self.con.execute(
+                'SELECT host, host_file, comp, comp_file FROM comp'):
+            self.comp_hosts.setdefault((h, hf), set()).add((c, cf))
+            self.reverse_components.setdefault((c, cf), set()).add((h, hf))
         # 模块映射基于全部已索引文件：纯模块（无类）项目里 mod.func() 调用
         # 也要能解析；旧版仅取含类文件的映射在这种项目上整链路静默降级
         self.modmap = {module_of(f): f for (f,) in
                        self.con.execute('SELECT path FROM files')}
         self._tree_cache = {}
-        self._imports_cache = {}  # file -> [(module,name,alias)]，候选验证热路径去重 SQL
+        self._imports_cache = {}  # (file,line) -> 可见 import 行，候选验证热路径去重 SQL
         # 语义查询缓存：mro_has_method 递归对同 (class,file) 重复查库是百万次级
         self._bases_cache = {}
         self._cfiles_cache = {}
         self._method_cache = {}
+        self._runtime_hosts_cache = {}
 
     # ---- 基础查表 ----
 
@@ -124,11 +128,10 @@ class Resolver(object):
                 hit = self.mro_has_method(b, bf, method, seen)
                 if hit:
                     return hit
-        for comp in self.comp_hosts.get(cls, ()):
-            for cf in self._class_files(comp):
-                hit = self.mro_has_method(comp, cf, method, seen)
-                if hit:
-                    return hit
+        for comp, cf in self.comp_hosts.get((cls, cls_file), ()):
+            hit = self.mro_has_method(comp, cf, method, seen)
+            if hit:
+                return hit
         return None
 
     # ---- 解析主入口 ----
@@ -145,8 +148,10 @@ class Resolver(object):
         if idx is not None:
             return idx
         tree = self._parse(file)
-        idx = {'tree': tree, 'calls': {}, 'funcs': [], 'classes': [], 'assigns': {}}
+        idx = {'tree': tree, 'calls': {}, 'funcs': [], 'classes': [],
+               'assigns': {}, 'scopes': []}
         if tree is not None:
+            idx['scopes'] = scope_ranges(tree)
             # 类/函数区间：按 (start, end) 收集，查询时取包含行的最内层
             for n in ast.walk(tree):
                 if isinstance(n, ast.ClassDef):
@@ -209,7 +214,7 @@ class Resolver(object):
                     if typ:
                         return self._method_on_type(typ, name, file)
                     # 模块级调用 mod.Func()：recv 是 import 进来的模块名
-                    mf = self._module_file_of(file, recv.id)
+                    mf = self._module_file_of(file, recv.id, line)
                     if mf:
                         rows = self.con.execute(
                             'SELECT file,line FROM defs WHERE file=? AND name=? '
@@ -228,19 +233,49 @@ class Resolver(object):
             return None
         return None
 
-    def _imports_of(self, file):
-        """文件的 import 行（缓存）；_ret_lookup/_module_file_of 逐候选调用。"""
-        rows = self._imports_cache.get(file)
-        if rows is None:
-            rows = self.con.execute(
-                'SELECT module, name, alias FROM imports WHERE file=?',
-                (file,)).fetchall()
-            self._imports_cache[file] = rows
-        return rows
+    def _imports_of(self, file, line=None):
+        """调用点可见的 import 行；模块域 + 外到内函数域，局部绑定覆盖外层。
 
-    def _module_file_of(self, file, name):
-        """调用点文件里 name 是否指向一个已索引模块（import 别名/前缀），是则返回其文件。"""
-        for (m, n, a) in self._imports_of(file):
+        同一作用域把同一个名字导向多个目标时剔除该绑定，避免静态分支导致
+        错误 VERIFIED。类体 import 不作为方法的裸名词法环境。
+        """
+        cache_key = (file, line)
+        cached = self._imports_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        rows = self.con.execute(
+            'SELECT module, name, alias, scope FROM imports WHERE file=? '
+            'ORDER BY line, rowid', (file,)).fetchall()
+        scopes = ['']
+        if line is not None:
+            funcs = [(a, b, key) for (a, b, key, kind)
+                     in self._file_index(file)['scopes']
+                     if kind == 'func' and a <= line <= b]
+            funcs.sort(key=lambda x: (x[0], -x[1]))
+            scopes.extend(key for (_a, _b, key) in funcs)
+        visible = {}
+        for scope in scopes:
+            local = {}
+            for m, n, a, row_scope in rows:
+                if row_scope != scope:
+                    continue
+                bound = a or n or (m.split('.', 1)[0] if m else None)
+                if not bound:
+                    continue
+                row = (m, n, a)
+                old = local.get(bound)
+                if bound not in local or old == row:
+                    local[bound] = row
+                else:
+                    local[bound] = None
+            visible.update(local)
+        out = [row for row in visible.values() if row is not None]
+        self._imports_cache[cache_key] = out
+        return out
+
+    def _module_file_of(self, file, name, line=None):
+        """调用点里 name 是否指向已索引模块，是则返回其文件。"""
+        for (m, n, a) in self._imports_of(file, line):
             if n == name or a == name:
                 if n:
                     for cand in ('%s.%s' % (m, n), m):
@@ -321,13 +356,13 @@ class Resolver(object):
                     best = None
                 else:
                     # 裸名：先按 import 语境查返回事实，查不到视为构造
-                    rt = self._ret_lookup(file, v.func.id) if file else None
+                    rt = self._ret_lookup(file, v.func.id, n.lineno) if file else None
                     best = rt or v.func.id
             else:
                 d = dotted(v.func)
                 best = None
                 if d and file:
-                    best = self._ret_lookup(file, d)
+                    best = self._ret_lookup(file, d, n.lineno)
                     if not best and '.' in d:
                         # head 是局部变量：先解其类型再查 (类型, 方法) 返回事实
                         head, func = d.rsplit('.', 1)
@@ -355,13 +390,13 @@ class Resolver(object):
         base, attr = typ.split('.', 1)
         return self.global_types.get(base, {}).get(attr)
 
-    def _ret_lookup(self, file, dotted_call):
+    def _ret_lookup(self, file, dotted_call, line=None):
         """module_or_var.Func(...) -> 返回类型（含种子）；import 别名先归一。"""
         if '.' not in dotted_call:
             head, func = dotted_call, ''
         else:
             head, func = dotted_call.rsplit('.', 1)
-        for (m, n, a) in self._imports_of(file):
+        for (m, n, a) in self._imports_of(file, line):
             if n == head or a == head:
                 # from X import Y：Y 可能是子模块（查 X.Y.Func）或对象/类
                 candidates = ['%s.%s' % (m, n) if n else m, m]
@@ -383,6 +418,101 @@ class Resolver(object):
             if hit:
                 return hit
         return None
+
+    # ---- 钩子约定回调 ----
+
+    def _reverse_bases(self):
+        if hasattr(self, '_reverse_bases_cache'):
+            return self._reverse_bases_cache
+        out = {}
+        rows = self.con.execute(
+            'SELECT file, name, bases FROM classes').fetchall()
+        for child_file, child, bases in rows:
+            for base in (bases.split(',') if bases else ()):
+                cands = self._class_files(base, child_file)
+                # 同名基类有歧义时仅接受同文件定义；宁可漏边，不跨镜像误连。
+                if len(cands) == 1:
+                    out.setdefault((base, cands[0]), set()).add((child, child_file))
+                elif child_file in cands:
+                    out.setdefault((base, child_file), set()).add((child, child_file))
+        self._reverse_bases_cache = out
+        return out
+
+    def runtime_hosts(self, cls, cls_file):
+        """类/组件在运行时可能落入的精确宿主集合（同类、继承、组件注入）。"""
+        key = (cls, cls_file)
+        cached = self._runtime_hosts_cache.get(key)
+        if cached is not None:
+            return cached
+        reverse_bases = self._reverse_bases()
+        seen = {key}
+        queue = [key]
+        while queue:
+            item = queue.pop(0)
+            next_items = set(self.reverse_components.get(item, ()))
+            next_items.update(reverse_bases.get(item, ()))
+            for nxt in next_items:
+                if not _file_mtime_ok(self.store, self.cfg, nxt[1]):
+                    continue
+                if nxt not in seen:
+                    seen.add(nxt)
+                    queue.append(nxt)
+        self._runtime_hosts_cache[key] = seen
+        return seen
+
+    def convention_sources(self, def_file, def_line, def_cls, func):
+        """目标方法的严格约定调用源；只有运行时宿主相交才成边。"""
+        if not def_cls:
+            return []
+        target_hosts = self.runtime_hosts(def_cls, def_file)
+        out = []
+        rows = self.con.execute(
+            'SELECT file,line,class,kind,source,target FROM callback_raw '
+            'WHERE target=? ORDER BY file,line', (func,)).fetchall()
+        for sf, sln, scls, kind, source, target in rows:
+            if not _file_mtime_ok(self.store, self.cfg, sf):
+                continue
+            hosts = sorted(target_hosts & self.runtime_hosts(scls, sf))
+            if not hosts:
+                continue
+            out.append({
+                'level': '%s-INFERRED' % kind.upper(),
+                'symbol': _display(def_cls, func),
+                'file': sf,
+                'line': sln,
+                'caller': '%s %s.%s' % (kind, scls, source),
+                'via_callback': {'kind': kind, 'source': source,
+                                 'target': target,
+                                 'hosts': [{'class': h, 'file': hf}
+                                           for h, hf in hosts]},
+            })
+        return out
+
+    def convention_targets(self, raw):
+        """单条 callback_raw -> 严格匹配的目标方法定义。"""
+        sf, sln, scls, kind, source, target = raw
+        if not _file_mtime_ok(self.store, self.cfg, sf):
+            return []
+        source_hosts = self.runtime_hosts(scls, sf)
+        out = []
+        rows = self.con.execute(
+            'SELECT file,line,class FROM defs WHERE name=? ORDER BY file,line',
+            (target,)).fetchall()
+        for tf, tln, tcls in rows:
+            if not tcls:
+                continue
+            if not _file_mtime_ok(self.store, self.cfg, tf):
+                continue
+            hosts = sorted(source_hosts & self.runtime_hosts(tcls, tf))
+            if not hosts:
+                continue
+            out.append({
+                'kind': kind, 'source': source, 'source_class': scls,
+                'source_file': sf, 'source_line': sln, 'target': target,
+                'target_class': tcls, 'target_file': tf, 'target_line': tln,
+                'hosts': [{'class': h, 'file': hf} for h, hf in hosts],
+            })
+        return out
 
 
 # ---- 模块级工具 ----
@@ -449,8 +579,10 @@ def _display(cls, func):
 # v2: 同名类并集语义 + 模块级调用解析；v3: 局部变量二级推导加递归深度防线；
 # v4: 行索引化 resolve_call（语义等价，性能重构）；
 # v5: modmap 基于全部已索引文件（原仅含类文件）——纯模块项目的
-#     mod.func() 调用从静默降级恢复为可验证
-RESOLVER_VERSION = 5
+#     mod.func() 调用从静默降级恢复为可验证；
+# v6: import 按词法作用域解析 + 钩子约定回调严格宿主连边；
+# v7: 约定回调边缓存纳入共同宿主文件 mtime
+RESOLVER_VERSION = 7
 
 
 # 内置函数/常见运行时名：callees 收集时的噪音过滤
@@ -468,6 +600,7 @@ def _result(query, items, t0, cached=False, note='', store=None):
         'query': query, 'items': items, 'cached': cached, 'note': note,
         'n_verified': sum(1 for i in items if i['level'] == 'VERIFIED'),
         'n_candidate': sum(1 for i in items if i['level'] == 'CANDIDATE'),
+        'n_inferred': sum(1 for i in items if i['level'].endswith('-INFERRED')),
         'elapsed': round(time.time() - t0, 3),
     }
     if store is not None:
@@ -589,9 +722,13 @@ def callers(store, cfg, file, func, resolver=None):
             items.append({'level': 'CANDIDATE', 'symbol': _display(def_cls, func),
                           'file': f, 'line': ln, 'caller': _display(cls, fname),
                           'note': '语义验证不可达（同名候选）'})
+    items.extend(r.convention_sources(def_file, def_line, def_cls, func))
     items.sort(key=lambda i: (i['level'], i['file'], i['line']))
-    _save_edges(store, func, def_file, def_line, 'callers', items,
-                set(i['file'] for i in items) | {def_file})
+    ref_files = set(i['file'] for i in items) | {def_file}
+    for item in items:
+        for host in item.get('via_callback', {}).get('hosts', ()):
+            ref_files.add(host['file'])
+    _save_edges(store, func, def_file, def_line, 'callers', items, ref_files)
     return _result({'file': file, 'func': func}, items, t0, note=note, store=store)
 
 

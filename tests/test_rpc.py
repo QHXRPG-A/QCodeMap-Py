@@ -36,6 +36,9 @@ class Fsm(object):
     def query(self):
         genv.avatar.CallServer('QueryRandom', 'OnQueryBack')
 
+    def packed(self, speed):
+        self.CallServerPacked('OnSpeedLevelChange', speed)
+
     def bad_variable_name(self, name):
         genv.player.CallServer(name)
 '''
@@ -47,6 +50,9 @@ class Avatar(object):
 
     def push(self, client):
         client.CallClient('ServerShowMessage', 'hello')
+
+    def OnSpeedLevelChange(self, speed):
+        self.speed = speed
 '''
 
 STUB_SRC = '''# -*- coding: utf-8 -*-
@@ -100,11 +106,11 @@ def main():
         store = Store(db)
         try:
             n_rpc = store.count('rpc')
-            # 6 处分发调用：5 个常量方法名入表 + 1 个变量名（CallServer(name)）跳过
-            if n_rpc != 5:
+            # 7 处分发调用：6 个常量方法名入表 + 1 个变量名（CallServer(name)）跳过
+            if n_rpc != 6:
                 rows = store.con.execute(
                     'SELECT * FROM rpc').fetchall()
-                failed.append('rpc 行应为 5（变量名跳过），实际 %d: %s'
+                failed.append('rpc 行应为 6（变量名跳过），实际 %d: %s'
                               % (n_rpc, rows))
 
             # ---- rpc_refs：C2S 配对 ----
@@ -115,6 +121,12 @@ def main():
                 failed.append('C2S 调用点配对失败: %s' % rpcs)
             if not any(i['file'] == S_AVATAR for i in hs):
                 failed.append('handler 定义未命中: %s' % hs)
+
+            # ---- CallServerPacked：真实签名首参为方法名 ----
+            out = rr_mod.rpc_refs(store, cfg, 'OnSpeedLevelChange', json_out=True)
+            packed = [i for i in out['items'] if i['level'] == 'RPC-INFERRED']
+            if len(packed) != 1 or packed[0]['chan'] != 'C2S':
+                failed.append('CallServerPacked C2S 提取失败: %s' % packed)
 
             # ---- S2C ----
             out = rr_mod.rpc_refs(store, cfg, 'ServerShowMessage', json_out=True)

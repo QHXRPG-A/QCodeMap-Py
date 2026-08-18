@@ -65,6 +65,8 @@ python -m qcodemap tree --depth 2
 python -m qcodemap blast-radius                        # 默认 svn st 采集变更
 python -m qcodemap blast-radius --rev 100:200          # 版本区间
 python -m qcodemap blast-radius --files a.py,b.py      # 显式清单
+python -m qcodemap blast-radius --mode summary         # 仅计数与层摘要
+python -m qcodemap blast-radius --mode page --section callers --layer 2 --offset 0 --limit 50
 
 # agent 消费面（P4）：路径定位 / 单文件打包 / 项目档案
 python -m qcodemap find avatar_scene                   # 模糊路径搜索
@@ -77,18 +79,20 @@ python -m qcodemap mcp
 
 所有命令支持 `--json` 机器可读输出（带 `schema_version` 与 `coverage`；
 ast 解析失败文件会在 coverage 里以 partial 状态透出，不静默残缺）。
+`blast-radius` 的 CLI 默认 `full` 保持兼容；MCP 默认 `summary` 防止大影响面
+撑满上下文，可用 `mode=page, section, layer, offset, limit` 按需取明细。
 
 ## 实测指标（孵化案例：约 9000 文件游戏项目，2026-08-18）
 
 | 指标 | 数值 |
 | --- | --- |
-| 全量建库 | 8925 文件 / 207s / 441MB（对照 PyCharm 同库索引 3.8GB） |
+| 全量建库 | 8927 文件 / 469s / 447MB（对照 PyCharm 同库索引 3.8GB） |
 | 语义查询（含验证） | 亚秒级；高频名首查 3s 量级 |
 | edges 缓存命中 | 0.001s |
 | 单文件增量 | 0.5s |
 | 语义回归 | 5/5 标准答案边，零假边 |
-| 结构四命令 | 全库各 ≤0.15s |
-| blast-radius | 2 文件 121 函数冷/热 0.4s |
+| 结构四命令 | 全库各 0.22~0.24s |
+| blast-radius | 2 文件 121 函数冷 43.2s / 热 0.7s（解析器升级后首次冷缓存） |
 | agent 消费面三命令 | find 0.004s / file-context 0.16s / context 0.34s（见 REQUIREMENTS 附录 E） |
 | 懒刷新 | MCP 查询发现 mtime 漂移自动增量 build，单文件级秒内 |
 
@@ -96,6 +100,8 @@ ast 解析失败文件会在 coverage 里以 partial 状态透出，不静默残
 
 - `VERIFIED`：语义验证链路（MRO/组件边/数据流/返回事实）落到目标定义
 - `CANDIDATE`：调用形态成立但解析不可达或同名歧义，注明解析到了哪个同名定义
+- `RPC-INFERRED` / `EVENT-INFERRED` / `PROPERTY-INFERRED`：由 custom
+  声明的框架约定推断，保留通道或共同运行时宿主证据，不冒充语义验证
 - 解析不了宁可降级，不给假边
 
 ## 目录结构
@@ -106,8 +112,8 @@ qcodemap/     核心引擎（项目无关）：cli / build / scanner / store / r
               mcp_server / hooks / config / defaults
 custom/       项目定制层：config.py（范围）/ facts.py（框架习语钩子）/
               seeds.py（人工种子）。仓库仅随附 README.md 模板
-tests/        八件回归套件 + original/（可行性脚本存档）；除 test_p4/
-              test_rpc/test_pubsub 自建临时库外，其余锚定孵化案例项目
+tests/        十件回归套件 + original/（可行性脚本存档）；局部 import、
+              callback、P4、RPC、pubsub 使用自建临时库，其余锚定孵化案例项目
               （需该代码库在场）
 cache/        索引产物（441MB，可再生，不入库）
 docs/         深入文档（见下）

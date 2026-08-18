@@ -89,7 +89,7 @@ def collect_files(cfg):
 
 _ALL_TABLES = ('meta', 'files', 'names', 'defs', 'classes', 'imports', 'attr',
                'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'pubsub',
-               'edges')
+               'callback_raw', 'edges')
 
 
 def _prepare_rebuild(db_path):
@@ -144,12 +144,13 @@ def build(cfg, rebuild=False, verbose=True):
         if n_new or n_upd or n_del:
             store.con.execute('DELETE FROM comp')
             for row in _resolve_comps(store, cfg):
-                store.con.execute('INSERT INTO comp VALUES(?,?,?)', row)
+                store.con.execute('INSERT INTO comp VALUES(?,?,?,?)', row)
         store.set_meta('built_at', str(int(time.time())))
         store.set_meta('root', cfg.root)
         stats = {
             'files': len(disk), 'new': n_new, 'updated': n_upd, 'deleted': n_del,
             'comp_raw': n_raw, 'comp': store.count('comp'),
+            'callback_raw': store.count('callback_raw'),
             'names': store.count('names'), 'parse_failed': store.parse_failed_count(),
             'elapsed': round(time.time() - t0, 1),
         }
@@ -171,7 +172,7 @@ def build(cfg, rebuild=False, verbose=True):
 def _drop_all(store):
     for table in ('files', 'names', 'defs', 'classes', 'imports', 'attr',
                   'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'pubsub',
-                  'edges'):
+                  'callback_raw', 'edges'):
         store.con.execute('DELETE FROM %s' % table)
 
 
@@ -209,7 +210,7 @@ def drift_check(store, cfg, rels, cap=DRIFT_CHECK_CAP):
 # ---- pass2: comp_raw -> comp ----
 
 def _resolve_comps(store, cfg):
-    """@Components 原始行 -> (host, comp_class, comp_file) 集合。
+    """@Components 原始行 -> (host, host_file, comp_class, comp_file) 集合。
 
     ref:  同文件类或 import 名字指向的模块；
     attr: mod.Cls 形态，按 import 前缀定位文件；
@@ -227,19 +228,19 @@ def _resolve_comps(store, cfg):
             hit = con.execute('SELECT 1 FROM classes WHERE file=? AND name=?',
                               (file, value)).fetchone()
             if hit:
-                out.add((host, value, file))
+                out.add((host, file, value, file))
                 continue
             for f in _import_target_files(con, mods, file, value):
                 if con.execute('SELECT 1 FROM classes WHERE file=? AND name=?',
                                (f, value)).fetchone():
-                    out.add((host, value, f))
+                    out.add((host, file, value, f))
                     break
         elif kind == 'attr':
             base, cls = value.rsplit('.', 1)
             for f in _import_target_files(con, mods, file, base):
                 if con.execute('SELECT 1 FROM classes WHERE file=? AND name=?',
                                (f, cls)).fetchone():
-                    out.add((host, cls, f))
+                    out.add((host, file, cls, f))
                     break
         elif kind == 'importall':
             pkg_mod = _resolve_module(con, mods, file, value)
@@ -273,7 +274,7 @@ def _resolve_comps(store, cfg):
                 for mname in member_names:
                     if con.execute('SELECT 1 FROM classes WHERE file=? AND name=?',
                                    (rel2, mname)).fetchone():
-                        out.add((host, mname, rel2))
+                        out.add((host, file, mname, rel2))
     return sorted(out)
 
 
@@ -284,8 +285,9 @@ def _import_target_files(con, mods, from_file, name):
     M.py 内的名字）、import M.name as name（-> M/name.py）、import name（-> name.py）。
     """
     cands = []
-    for (m, n, a) in con.execute('SELECT module,name,alias FROM imports WHERE file=?',
-                                 (from_file,)).fetchall():
+    for (m, n, a) in con.execute(
+            'SELECT module,name,alias FROM imports WHERE file=? AND scope=?',
+            (from_file, '')).fetchall():
         if not (n == name or a == name):
             continue
         if n:
@@ -309,8 +311,9 @@ def _resolve_module(con, mods, from_file, ref):
     if ref in mods:
         return ref
     fid_mod = scanner.module_of(from_file)
-    for (m, n, a) in con.execute('SELECT module,name,alias FROM imports WHERE file=?',
-                                 (from_file,)).fetchall():
+    for (m, n, a) in con.execute(
+            'SELECT module,name,alias FROM imports WHERE file=? AND scope=?',
+            (from_file, '')).fetchall():
         if n == ref or a == ref:
             full = '%s.%s' % (m, n) if n else m
             return full if full in mods else (m if m in mods else None)

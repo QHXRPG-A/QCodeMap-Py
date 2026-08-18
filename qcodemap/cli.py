@@ -109,6 +109,15 @@ def main(argv=None):
     p_blast.add_argument('--files', default=None, help='逗号分隔文件清单（缺省走 svn st）')
     p_blast.add_argument('--rev', default=None, help='svn 版本区间 X:Y')
     p_blast.add_argument('--depth', type=int, default=3, help='闭包深度（0 不限）')
+    p_blast.add_argument('--mode', choices=['full', 'summary', 'page'], default='full',
+                         help='输出模式；CLI 默认 full 保持兼容')
+    p_blast.add_argument('--section', choices=['callers', 'importers'],
+                         default='callers', help='page 模式的分页部分')
+    p_blast.add_argument('--layer', type=int, default=1,
+                         help='page callers 的层级（1=直接调用方）')
+    p_blast.add_argument('--offset', type=int, default=0)
+    p_blast.add_argument('--limit', type=int, default=50,
+                         help='page 每页数量（1..200）')
     p_blast.add_argument('--root', default=None)
     p_blast.add_argument('--db', default=None)
     p_blast.add_argument('--json', action='store_true')
@@ -199,7 +208,9 @@ def main(argv=None):
         try:
             out = blast.blast(store, cfg,
                               files=args.files.split(',') if args.files else None,
-                              rev=args.rev, depth=args.depth or 99, json_out=args.json)
+                              rev=args.rev, depth=args.depth or 99, json_out=args.json,
+                              mode=args.mode, section=args.section, layer=args.layer,
+                              offset=args.offset, limit=args.limit)
         finally:
             store.close()
         if args.json:
@@ -265,9 +276,9 @@ def _print_result(out, as_json):
     if cov and cov.get('status') == 'partial':
         print('coverage: partial（全库 %d 个文件 ast 解析失败，索引仅 names）'
               % cov['parse_failed'])
-    print('耗时 %.3fs%s  VERIFIED=%d CANDIDATE=%d'
+    print('耗时 %.3fs%s  VERIFIED=%d CANDIDATE=%d INFERRED=%d'
           % (out['elapsed'], '（缓存命中）' if out.get('cached') else '',
-             out['n_verified'], out['n_candidate']))
+             out['n_verified'], out['n_candidate'], out.get('n_inferred', 0)))
 
 
 if __name__ == '__main__':

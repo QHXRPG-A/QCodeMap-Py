@@ -30,16 +30,16 @@
 | `config.py` | 配置装载：defaults ← custom ← CLI 三级覆盖 | custom 按文件路径 importlib 动态加载，核心包不 import custom 的任何名字 |
 | `defaults.py` | 内建默认配置 | 保证裸核心（无 custom）对任意 Python 目录可用 |
 | `hooks.py` | 事实提取钩子协议（FactsHooks/FactContext） | 框架习语与核心的唯一接缝，见 CUSTOM_GUIDE |
-| `scanner.py` | 单文件扫描：names 倒排 + defs/classes/imports + 事实原始行 | utf-8→gbk 解码链；bytes 字面量剔除；降采样（表格目录每标识符只记首处）；ast 失败仅保 names |
+| `scanner.py` | 单文件扫描：names 倒排 + defs/classes/词法 imports + 事实原始行 | 全作用域 import 落库，函数钩子只见模块+词法父函数；bytes 字面量剔除；ast 失败仅保 names |
 | `store.py` | SQLite 封装：DDL / files 登记（mtime）/ file 级联删除 | names.file 用 file_id 整型（大表省空间），其余事实表 file 列直接存路径 |
-| `build.py` | 遍历 + mtime 增量 + pass2 组件解析 | INCLUDE_PATHS 路径级放行优先于目录名排除；include 路径内豁免文件级排除（origin 明文版） |
-| `resolve.py` | 两阶段语义验证 + callers/callees/usages + edges 缓存 | 性能敏感区，见 §4 |
+| `build.py` | 遍历 + mtime 增量 + pass2 组件解析 | 组件边保留 host_file 精确身份；装饰器解析只消费模块级 import |
+| `resolve.py` | 两阶段语义验证 + callers/callees/usages + 约定回调 + edges 缓存 | 性能敏感区，见 §4 |
 | `structure.py` | deps/importers/hubs/tree 结构四命令 | 纯 SQL + 内存 modmap，无 ast-grep；coverage 按 scope 内 parse_ok 给 partial |
-| `blast.py` | 变更影响面：变更集采集（svn st/--rev/--files）+ 调用链闭包 | 闭包复用 Resolver；超高频名只吃缓存；RPC 边穿透（via_rpc 标注） |
+| `blast.py` | 变更影响面：变更集采集 + 调用链闭包 + 输出投影 | 完整计算后提供 summary/page/full；caller 按 layer、importers 独立分页 |
 | `rpc_refs.py` | RPC 双端配对查询：rpc 表调用点 + defs 表 handler | RPC-INFERRED/HANDLER 分级；stub 精确配对优先，方法名兜底 |
 | `pubsub_refs.py` | 事件双端配对查询：pubsub 表两侧事实 | EVENT-INFERRED/LISTENER 分级；裸事件名按后缀匹配分组（防跨端撞名） |
 | `context.py` | agent 消费面三命令：find_file / get_file_context / context | 全查表无 ast 现扫；context 为一次性项目档案（qcodemap.context/v1） |
-| `mcp_server.py` | stdio JSON-RPC MCP server（14 工具） | 日志一律 stderr——stdout 是协议流，print 即损坏；目标文件型工具带懒刷新 |
+| `mcp_server.py` | stdio JSON-RPC MCP server（14 工具） | 自举 UTF-8；日志一律 stderr；blast 默认 summary；目标文件型工具带懒刷新 |
 | `custom/` | 项目定制层（config/facts/seeds 三件，仓库仅随附模板说明） | 见 CUSTOM_GUIDE |
 
 ## 3. 表结构（store.DDL）
@@ -49,13 +49,14 @@
 | `files` | id / path / mtime / parse_ok，增量与级联删除的锚点；parse_ok=0 即 ast 失败（索引仅 names） | 8925 |
 | `names` | 标识符倒排（name, file_id, line, col），阶段1 唯一大表 | ~765 万（降采样后） |
 | `defs` / `classes` | 函数/类定义（file, line, class, name；类含 bases 逗号串） | 数万 |
-| `imports` | (file, module, name, alias)，相对导入在建库时归一为绝对 | ~30 万 |
+| `imports` | (file, module, name, alias, line, scope)，相对导入归一；结构图消费全部作用域 | ~30 万 |
 | `attr` | 属性类型事实：Property 声明（含第二参数类型）+ self.X=构造 | 数万 |
 | `global_assign` | 运行时全局注入：genv.X = self → (base, attr, class) | 数百 |
 | `ret` | 返回类型事实：return 构造()（module/class.method 两个命名空间） | 数千 |
-| `comp_raw` / `comp` | @Components 原始行 / 解析后的 host↔comp 边 | 3831/3658 |
+| `comp_raw` / `comp` | @Components 原始行 / 精确 (host,host_file)↔(comp,comp_file) 边 | 3659/3881 |
 | `rpc` | 字符串分发 RPC 调用点：(file, line, chan, method, stub)，stub 可 NULL | 数千（见附录 F） |
 | `pubsub` | 事件分发两侧事实：(file, line, side, event, func, cls)，event 是 import 归一的常量键 | 数千（见附录 G） |
+| `callback_raw` | custom 声明的通用约定回调：(file,line,class,kind,source,target) | 数千 |
 | `edges` | 查询结果缓存（name+def+kind 主键，payload 含 mtimes 与版本） | 按查询增长 |
 | `meta` | schema 版本 / 构建统计 | - |
 
@@ -112,6 +113,9 @@ gclient/data、gserver/data 的 .py 是 bindict 二进制（bytes 字面量）�
 `from M import N` 的 N 可能是子模块（落 `M/N.py`）也可能是 M 内的名字
 （落 `M.py`），按序尝试。历史教训：可行性版一律拼 `M.py`，导致全部
 attr 形态组件边丢失。模块映射基于全部已索引文件（__init__.py 可能无类）。
+imports 表记录模块、类、函数内全部导入供结构图使用；组件装饰器只读取
+scope 为空的模块级导入。调用解析与 custom 钩子按调用点恢复模块域和外到内
+函数域，同一作用域别名冲突时降级未解析，不产生错误 VERIFIED。
 
 ### 5.7 覆盖率契约（P4：失败不静默）
 scanner 把 ast 解析失败记为 files.parse_ok=0（事实降级仅保 names）。查询侧
@@ -160,12 +164,28 @@ receiver（裸名 Publish(x.Y) 防误报）。嵌套 def 双访问按
 标注）。已知边界：变量首参（全库约 3 处）不做属性回溯；模块级语句里的
 pubsub 调用不采集（与 rpc 口径一致）。
 
+### 5.11 通用约定回调与 Property custom 规则
+
+core 提供 `callback_facts(stmt, ctx) -> [(kind, source, target)]` 协议及
+callback_raw 存储，不认识 Property 或 `_on_set_`。孵化案例只在
+custom/facts.py 把 `Property("x", ...)` 映射为
+`('PROPERTY', 'x', '_on_set_x')`。resolver 对声明类和目标方法类分别求
+同类、反向继承、精确 @Components 注入的运行时宿主闭包；交集非空才返回
+`PROPERTY-INFERRED`，并附 host class/file 证据。blast 对变更声明把目标回调
+列为第一层 `via_callback` 影响。
+
+### 5.12 blast 输出投影
+
+闭包始终计算到 depth/MAX_EDGES，`limit` 只约束序列化，不改变计数与后续层。
+CLI 默认 full 保持旧行为；MCP 默认 summary。page 模式以 callers/importers
+为 section，callers 再按 layer（1=直接、2+=传递）和 offset/limit 分页。
+
 ## 6. 已知边界（接手者从这里继续）
 
 - `Space.GetEntity` 等通用方法返回类型是语境近似（seeds 人工标注），
   跨语境会错——REQUIREMENTS §3-1 的「调用方语境投票」是规划解法
-- attr 版引用查询（哪个 self.X 访问流经哪个 Property 声明）尚未成命令，
-  comp 表只有 host→comp 方向，组件反查宿主声明需走 genv/种子链人工推
+- attr 版引用查询（哪个 self.X 读写流经哪个 Property 声明）尚未成命令；
+  `_on_set_x` 约定回调已覆盖，但普通属性访问仍需 usages/源码链确认
 - MCP server 的 qcodemap_build 全量 rebuild 在 server 进程内执行会阻塞
   该连接约 3.5 分钟（工具级可接受，未做进度上报）
 - 函数参数无类型标注时，`store.count(...)` 这类「参数名.方法()」调用

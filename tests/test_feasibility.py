@@ -54,7 +54,7 @@ def build_small(cfg):
             os.path.join(cfg.root, rel.replace('/', os.sep))))
         store.insert_rows(fid, rows)
     store.con.executemany(
-        'INSERT INTO comp VALUES(?,?,?)',
+        'INSERT INTO comp VALUES(?,?,?,?)',
         _resolve_comps(store, cfg))
     store.commit()
     return store

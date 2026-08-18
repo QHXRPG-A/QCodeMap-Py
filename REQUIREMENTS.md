@@ -426,3 +426,23 @@ distinct 事件键 1363 个，其中 1212 个双端配对成功（有发布有�
 - 模块级语句里的 pubsub 调用不采集（与 rpc 口径一致）；
 - 客户端 `self.Publish`/`self.Broadcast` 之外的理论形态（模块级
   pubsub.Publish 3 处转发）不单列，UnBoundPublishFunc 已入分发表。
+
+## 附录 H：作用域 import、约定回调与上下文控制（2026-08-18）
+
+本轮保持“通用能力在 qcodemap/、框架语法只在 custom/”边界：
+
+- imports schema 增加 line/scope。结构图消费所有作用域；组件解析只消费
+  模块级 import；调用与事件归一按调用点词法域解析，跨函数同名别名不串线。
+- core 新增 callback_facts 通用协议和严格运行时宿主交集；Messiah custom
+  才识别 `Property("x") -> _on_set_x`，输出 `PROPERTY-INFERRED`。
+- `CallServerPacked(method, *args)` 在 Messiah RPC_DISPATCHERS 登记为 C2S；
+  无方法名参数的 CallServerDrive 仍排除。
+- blast 输出升级为 qcodemap.blast/v2。MCP 默认 summary、CLI 默认 full；
+  page 对 callers 按 layer 分页、对 importers 单独分页，limit 只裁输出。
+- MCP server 启动时自举 stdin/stdout/stderr UTF-8，不再要求调用方设置
+  PYTHONUTF8；stdout 仍只承载 JSON-RPC。
+
+主库重建：8927 文件、7651033 names、447MB、469.4s、ast 失败 1。
+真实锚点：avatar_scene_node importers 18→19（补到 comp_toplogo 局部 import）；
+OnSpeedLevelChange 捕获 3 个 CallServerPacked C2S 调用；闪电 capybara_state
+连到客户端 `_on_set_capybara_state`，共同宿主 3 个且无同名兜底误连。

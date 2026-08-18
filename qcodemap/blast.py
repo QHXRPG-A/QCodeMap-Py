@@ -19,6 +19,8 @@ from qcodemap import structure as st
 
 MAX_EDGES = 1000  # 闭包安全上限：超过即截断并在输出标注
 MAX_NAME_CANDS = 1500  # 超高频名冷验证分钟级且影响面无增量信息，只吃缓存
+MAX_OUTPUT_LIMIT = 200
+BLAST_SCHEMA_VERSION = 'qcodemap.blast/v2'
 
 
 def collect_svn_status(cfg):
@@ -83,6 +85,17 @@ def changed_functions(store, cfg, file, diff_text=None):
     return result
 
 
+def changed_callbacks(store, file, diff_text=None):
+    """变更文件 -> 钩子声明的通用约定回调事实。"""
+    rows = store.con.execute(
+        'SELECT file,line,class,kind,source,target FROM callback_raw '
+        'WHERE file=? ORDER BY line', (file,)).fetchall()
+    if diff_text is None:
+        return rows
+    ranges = _hunk_new_ranges(diff_text)
+    return [row for row in rows if any(a <= row[1] <= b for a, b in ranges)]
+
+
 _HUNK_RE = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')
 
 
@@ -100,9 +113,12 @@ def _hunk_new_ranges(diff_text):
 
 
 def blast(store, cfg, files=None, rev=None, depth=3, use_svn_status=True,
-          json_out=False):
+          json_out=False, mode='full', section='callers', layer=1,
+          offset=0, limit=50):
     """主入口：变更集 -> 影响报告。files/rev 均未给时走 svn st。"""
     t0 = time.time()
+    depth = depth or 99
+    _validate_output_args(mode, section, layer, offset, limit)
     # 1. 变更集
     if files:
         changed = [f.replace('\\', '/') for f in files]
@@ -121,11 +137,14 @@ def blast(store, cfg, files=None, rev=None, depth=3, use_svn_status=True,
 
     # 2. 变更函数
     funcs = []
+    callbacks = []
     for f in changed:
         funcs.extend(changed_functions(store, cfg, f, diffs.get(f)))
+        callbacks.extend(changed_callbacks(store, f, diffs.get(f)))
 
     # 3. 调用链闭包（VERIFIED 边）
-    direct, transitive, truncated = _impact_closure(store, cfg, funcs, depth)
+    direct, transitive, truncated = _impact_closure(
+        store, cfg, funcs, depth, callbacks=callbacks)
 
     # 4. import 级维度
     idx = st.StructureIndex(store)
@@ -138,17 +157,29 @@ def blast(store, cfg, files=None, rev=None, depth=3, use_svn_status=True,
             if d in dsts and s not in imp_by_file.get(f, set()) | {f}:
                 imp_by_file.setdefault(f, set()).add(s)
 
+    report = {
+        'schema_version': BLAST_SCHEMA_VERSION,
+        'changed_files': sorted(changed),
+        'changed_functions': [{'file': _func_file(store, fn), **fn} for fn in funcs],
+        'changed_callbacks': [
+            {'file': f, 'line': ln, 'class': cls, 'kind': kind,
+             'source': source, 'target': target}
+            for f, ln, cls, kind, source, target in callbacks],
+        'direct_callers': sorted(
+            direct, key=lambda i: (i['layer'], i['caller_file'],
+                                   i['caller_line'], i['target'])),
+        'transitive_callers': sorted(
+            transitive, key=lambda i: (i['layer'], i['caller_file'],
+                                       i['caller_line'], i['target'])),
+        'truncated': truncated,
+        'importers': {f: sorted(v) for f, v in imp_by_file.items()},
+        'elapsed': round(time.time() - t0, 3),
+    }
+    projected = _project_report(report, mode, section, layer, offset, limit, depth)
     if json_out:
-        return {
-            'schema_version': st.SCHEMA_VERSION,
-            'changed_files': sorted(changed),
-            'changed_functions': [{'file': _func_file(store, fn), **fn} for fn in funcs],
-            'direct_callers': direct,
-            'transitive_callers': transitive,
-            'truncated': truncated,
-            'importers': {f: sorted(v) for f, v in imp_by_file.items()},
-            'elapsed': round(time.time() - t0, 3),
-        }
+        return projected
+    if mode != 'full':
+        return _format_projection(projected)
     lines = ['blast-radius: 变更 %d 文件 / %d 函数, 闭包深度 %d%s'
              % (len(changed), len(funcs), depth, '（截断）' if truncated else '')]
     lines.append('  变更文件:')
@@ -168,11 +199,107 @@ def blast(store, cfg, files=None, rev=None, depth=3, use_svn_status=True,
     return '\n'.join(lines)
 
 
+def _validate_output_args(mode, section, layer, offset, limit):
+    if mode not in ('full', 'summary', 'page'):
+        raise ValueError('mode 必须是 full/summary/page')
+    if mode == 'page':
+        if section not in ('callers', 'importers'):
+            raise ValueError('section 必须是 callers/importers')
+        if layer < 1:
+            raise ValueError('layer 必须 >= 1')
+        if offset < 0:
+            raise ValueError('offset 必须 >= 0')
+        if limit < 1 or limit > MAX_OUTPUT_LIMIT:
+            raise ValueError('limit 必须在 1..%d' % MAX_OUTPUT_LIMIT)
+
+
+def _project_report(report, mode, section, layer, offset, limit, depth):
+    """完整计算结果 -> full/summary/page 输出；分页不改变闭包计算。"""
+    _validate_output_args(mode, section, layer, offset, limit)
+    callers = report['direct_callers'] + report['transitive_callers']
+    by_layer = {}
+    for item in callers:
+        by_layer[item['layer']] = by_layer.get(item['layer'], 0) + 1
+    importer_items = [
+        {'changed_file': changed_file, 'importer': importer}
+        for changed_file, importers in sorted(report['importers'].items())
+        for importer in importers]
+    summary = {
+        'changed_files': len(report['changed_files']),
+        'changed_functions': len(report['changed_functions']),
+        'changed_callbacks': len(report['changed_callbacks']),
+        'callers_total': len(callers),
+        'caller_layers': [{'layer': n, 'total': by_layer[n]}
+                          for n in sorted(by_layer)],
+        'importers_total': len(importer_items),
+        'depth': depth,
+        'truncated': report['truncated'],
+        'max_edges': MAX_EDGES,
+    }
+    if mode == 'full':
+        out = dict(report)
+        out['mode'] = mode
+        out['summary'] = summary
+        return out
+    out = {
+        'schema_version': BLAST_SCHEMA_VERSION,
+        'mode': mode,
+        'summary': summary,
+        'elapsed': report['elapsed'],
+    }
+    if mode == 'summary':
+        return out
+    if section == 'callers':
+        source = [item for item in callers if item['layer'] == layer]
+    else:
+        source = importer_items
+    items = source[offset:offset + limit]
+    next_offset = offset + len(items)
+    out['page'] = {
+        'section': section,
+        'layer': layer if section == 'callers' else None,
+        'offset': offset,
+        'limit': limit,
+        'total': len(source),
+        'returned': len(items),
+        'has_more': next_offset < len(source),
+        'next_offset': next_offset if next_offset < len(source) else None,
+        'items': items,
+    }
+    return out
+
+
+def _format_projection(out):
+    summary = out['summary']
+    lines = ['blast-radius %s: 变更 %d 文件 / %d 函数 / %d 约定声明'
+             % (out['mode'], summary['changed_files'],
+                summary['changed_functions'], summary['changed_callbacks'])]
+    lines.append('  callers=%d importers=%d%s'
+                 % (summary['callers_total'], summary['importers_total'],
+                    '（闭包截断）' if summary['truncated'] else ''))
+    if out['mode'] == 'page':
+        page = out['page']
+        lines.append('  page %s%s offset=%d limit=%d: %d/%d%s'
+                     % (page['section'],
+                        (' layer=%d' % page['layer']) if page['layer'] else '',
+                        page['offset'], page['limit'], page['returned'], page['total'],
+                        '（还有下一页）' if page['has_more'] else ''))
+        for item in page['items']:
+            if page['section'] == 'callers':
+                lines.append('    L%d %s:%s in %s'
+                             % (item['layer'], item['caller_file'],
+                                item['caller_line'], item['caller']))
+            else:
+                lines.append('    %s <- %s'
+                             % (item['changed_file'], item['importer']))
+    return '\n'.join(lines)
+
+
 def _func_file(store, fn):
     return fn.get('file', '')
 
 
-def _impact_closure(store, cfg, funcs, depth):
+def _impact_closure(store, cfg, funcs, depth, callbacks=None):
     """变更函数 -> {直接, 传递} 调用方。visited 防环，MAX_EDGES 截断。
 
     性能要点：共享一个 Resolver（callers 每次冷路径新建会全表初始化）；
@@ -207,6 +334,36 @@ def _impact_closure(store, cfg, funcs, depth):
         for (df, dl) in targets:
             enqueue({'class': fn['class'], 'func': fn['func'], 'file': df}, 0)
 
+    # 声明式框架边：由 custom 钩子产出通用 callback_raw，core 只按
+    # 同类/继承/@Components 宿主验证。声明变更时，目标回调属于第一层影响。
+    if callbacks:
+        resolver = rmod.Resolver(store, cfg)
+        for raw in callbacks:
+            for cb in resolver.convention_targets(raw):
+                n_edges += 1
+                if n_edges > MAX_EDGES:
+                    truncated = True
+                    break
+                key = (cb['target_file'], cb['target_line'])
+                if key in seen_direct:
+                    continue
+                seen_direct.add(key)
+                direct.append({
+                    'layer': 1,
+                    'target': '%s %s.%s' % (
+                        cb['kind'], cb['source_class'], cb['source']),
+                    'caller': rmod._display(cb['target_class'], cb['target']),
+                    'caller_file': cb['target_file'],
+                    'caller_line': cb['target_line'],
+                    'via_callback': {'kind': cb['kind'],
+                                     'source': cb['source'],
+                                     'hosts': cb['hosts']},
+                })
+                enqueue({'class': cb['target_class'], 'func': cb['target'],
+                         'file': cb['target_file']}, 1)
+            if truncated:
+                break
+
     while frontier:
         (fn, level) = frontier.pop(0)
         if level >= depth:
@@ -239,6 +396,7 @@ def _impact_closure(store, cfg, funcs, depth):
                     break
                 key = (item['file'], item['line'])
                 entry = {
+                    'layer': level + 1,
                     'target': ('%s.%s' % (fn['class'], fn['func'])) if fn['class'] else fn['func'],
                     'caller': item['caller'], 'caller_file': item['file'],
                     'caller_line': item['line'],
@@ -250,9 +408,15 @@ def _impact_closure(store, cfg, funcs, depth):
                 else:
                     if key not in seen_trans:
                         seen_trans.add(key)
-                        transitive.append({'caller_loc': '%s:%s in %s'
-                                           % (item['file'], item['line'], item['caller']),
-                                           'via': entry['target']})
+                        transitive.append({
+                            'layer': level + 1,
+                            'target': entry['target'],
+                            'caller': item['caller'],
+                            'caller_file': item['file'],
+                            'caller_line': item['line'],
+                            'caller_loc': '%s:%s in %s'
+                                          % (item['file'], item['line'], item['caller']),
+                            'via': entry['target']})
                 # 调用点外层函数：查其真实定义（class+name 维度）后继续向上
                 caller_cls, caller_func = _split_display(item['caller'])
                 if not caller_func:
@@ -279,7 +443,8 @@ def _impact_closure(store, cfg, funcs, depth):
                 resolver = rmod.Resolver(store, cfg)
             rcls, rfunc = resolver._enclosing_of(rf, rln)
             target = ('%s.%s' % (fn['class'], fn['func'])) if fn['class'] else fn['func']
-            entry = {'target': target, 'caller': rmod._display(rcls, rfunc),
+            entry = {'layer': level + 1,
+                     'target': target, 'caller': rmod._display(rcls, rfunc),
                      'caller_file': rf, 'caller_line': rln,
                      'via_rpc': chan}
             if level == 0:
@@ -289,9 +454,15 @@ def _impact_closure(store, cfg, funcs, depth):
             else:
                 if key not in seen_trans:
                     seen_trans.add(key)
-                    transitive.append({'caller_loc': '%s:%s in %s'
-                                       % (rf, rln, entry['caller']),
-                                       'via': '%s(rpc:%s)' % (target, chan)})
+                    transitive.append({
+                        'layer': level + 1,
+                        'target': target,
+                        'caller': entry['caller'],
+                        'caller_file': rf,
+                        'caller_line': rln,
+                        'caller_loc': '%s:%s in %s' % (rf, rln, entry['caller']),
+                        'via': '%s(rpc:%s)' % (target, chan),
+                        'via_rpc': chan})
             if rfunc:
                 enqueue({'class': rcls, 'func': rfunc, 'file': rf}, level + 1)
         # pubsub 事件边穿透（双向）：frontier 函数是订阅 handler -> 同事件的
@@ -328,7 +499,8 @@ def _impact_closure(store, cfg, funcs, depth):
                 frontier = []
                 break
             key = (pf, pln)
-            entry = {'target': target,
+            entry = {'layer': level + 1,
+                     'target': target,
                      'caller': '%s.%s' % (pcls, pfunc) if pcls else (pfunc or '?'),
                      'caller_file': pf, 'caller_line': pln,
                      'via_pubsub': e}
@@ -339,9 +511,15 @@ def _impact_closure(store, cfg, funcs, depth):
             else:
                 if key not in seen_trans:
                     seen_trans.add(key)
-                    transitive.append({'caller_loc': '%s:%s in %s'
-                                       % (pf, pln, entry['caller']),
-                                       'via': '%s(pubsub:%s)' % (target, e)})
+                    transitive.append({
+                        'layer': level + 1,
+                        'target': target,
+                        'caller': entry['caller'],
+                        'caller_file': pf,
+                        'caller_line': pln,
+                        'caller_loc': '%s:%s in %s' % (pf, pln, entry['caller']),
+                        'via': '%s(pubsub:%s)' % (target, e),
+                        'via_pubsub': e})
             if pfunc:
                 enqueue({'class': pcls, 'func': pfunc, 'file': pf}, level + 1)
     return direct, transitive, truncated

@@ -28,6 +28,17 @@ def _log(msg):
     sys.stderr.flush()
 
 
+def _force_utf8(stream, errors='strict'):
+    """stdio 文本流自举为 UTF-8；注入的 StringIO 等无 reconfigure 时跳过。"""
+    reconfigure = getattr(stream, 'reconfigure', None)
+    if reconfigure is None:
+        return
+    try:
+        reconfigure(encoding='utf-8', errors=errors)
+    except (AttributeError, TypeError, ValueError):
+        pass
+
+
 # ---- 懒刷新（P4-5） ----
 
 def _scope_rels(store, target):
@@ -177,7 +188,12 @@ def _tool_blast(args):
         out = blast_mod.blast(store, cfg,
                               files=flist,
                               rev=args.get('rev'),
-                              depth=int(args.get('depth', 3)), json_out=True)
+                              depth=int(args.get('depth', 3)), json_out=True,
+                              mode=args.get('mode', 'summary'),
+                              section=args.get('section', 'callers'),
+                              layer=int(args.get('layer', 1)),
+                              offset=int(args.get('offset', 0)),
+                              limit=int(args.get('limit', 50)))
     finally:
         store.close()
     if refresh:
@@ -316,7 +332,19 @@ _TOOLS = [
                                                  'description': '逗号分隔文件清单（可选）'},
                                        'rev': {'type': 'string',
                                                'description': 'svn 版本区间 X:Y（可选）'},
-                                       'depth': {'type': 'integer', 'default': 3}},
+                                       'depth': {'type': 'integer', 'default': 3},
+                                       'mode': {'type': 'string',
+                                                'enum': ['summary', 'page', 'full'],
+                                                'default': 'summary'},
+                                       'section': {'type': 'string',
+                                                   'enum': ['callers', 'importers'],
+                                                   'default': 'callers'},
+                                       'layer': {'type': 'integer', 'minimum': 1,
+                                                 'default': 1},
+                                       'offset': {'type': 'integer', 'minimum': 0,
+                                                  'default': 0},
+                                       'limit': {'type': 'integer', 'minimum': 1,
+                                                 'maximum': 200, 'default': 50}},
                         'required': []},
         'handler': _tool_blast,
     },
@@ -432,8 +460,13 @@ def _err(msg_id, code, message):
 
 def serve(stdin=None, stdout=None):
     """读行->处理->写行；EOF 结束。参数可注入便于测试。"""
-    stdin = stdin or sys.stdin
-    stdout = stdout or sys.stdout
+    if stdin is None:
+        _force_utf8(sys.stdin)
+        stdin = sys.stdin
+    if stdout is None:
+        _force_utf8(sys.stdout)
+        stdout = sys.stdout
+    _force_utf8(sys.stderr, errors='backslashreplace')
     _log('qcodemap mcp server up, %d tools' % len(_TOOLS))
     for line in stdin:
         line = line.strip()

@@ -40,6 +40,33 @@ def main():
         if not out.get('importers'):
             failed.append('import 级 importers 为空')
 
+        # 输出投影：摘要不携带大数组；调用层/importers 均可稳定分页。
+        summary = blast.blast(
+            store, cfg, files=['gclient/framework/util/replay_util.py'], depth=1,
+            json_out=True, mode='summary')
+        if summary.get('mode') != 'summary' or 'direct_callers' in summary:
+            failed.append('summary 模式仍泄漏全量明细: %s' % summary.keys())
+        page1 = blast.blast(
+            store, cfg, files=['gclient/framework/util/replay_util.py'], depth=1,
+            json_out=True, mode='page', section='callers', layer=1,
+            offset=0, limit=2)
+        if page1['page']['returned'] > 2 or page1['page']['layer'] != 1:
+            failed.append('caller 分页参数未生效: %s' % page1['page'])
+        if page1['page']['has_more']:
+            page2 = blast.blast(
+                store, cfg, files=['gclient/framework/util/replay_util.py'], depth=1,
+                json_out=True, mode='page', section='callers', layer=1,
+                offset=page1['page']['next_offset'], limit=2)
+            sites1 = {(i['caller_file'], i['caller_line']) for i in page1['page']['items']}
+            sites2 = {(i['caller_file'], i['caller_line']) for i in page2['page']['items']}
+            if sites1 & sites2:
+                failed.append('caller 相邻页出现重复: %s' % (sites1 & sites2))
+        imp_page = blast.blast(
+            store, cfg, files=['gclient/framework/util/replay_util.py'], depth=1,
+            json_out=True, mode='page', section='importers', offset=0, limit=3)
+        if imp_page['page']['returned'] > 3 or imp_page['page']['layer'] is not None:
+            failed.append('importers 分页参数未生效: %s' % imp_page['page'])
+
         t0 = time.time()
         blast.blast(store, cfg,
                     files=['gclient/framework/util/replay_util.py',

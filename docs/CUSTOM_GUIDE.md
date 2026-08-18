@@ -60,7 +60,7 @@ seeds：custom 键覆盖内置同键种子（dict 合并语义）
 custom 文件按路径 importlib 动态加载（`qcodemap_custom_config` 等模块名），
 缺失哪个文件就用哪个默认——所以三个文件全部可选。
 
-## 3. 扩展框架语义：FactsHooks 六个钩子
+## 3. 扩展框架语义：FactsHooks 七个钩子
 
 先在目标代码里确认习语的真实形态（`grep -n` 看实际写法），再实现：
 
@@ -96,6 +96,11 @@ class MyFacts(FactsHooks):
         """函数体内任意 Call 节点 -> [(side, event), ...]。
         事件分发提取（订阅装饰器/发布调用），event 建议用 ctx.imports
         归一成「模块路径.常量名」保证两侧可 join。详见 §3.2。"""
+
+    def callback_facts(self, stmt, ctx):
+        """类体声明 -> [(kind, source, target), ...]。
+        用于声明式框架产生的动态回调；core 只做共同运行时宿主验证，
+        不认识声明函数名或回调命名规则。详见 §3.3。"""
 ```
 
 事实行必须与 store 表列一致：
@@ -107,6 +112,8 @@ class MyFacts(FactsHooks):
   钩子产出，scanner 负责补 rel/line）
 - `pubsub`：`(rel, line, side, event, func, cls)`（由 pubsub_facts 钩子
   产出 (side, event)，scanner 补定位列与所在函数/类）
+- `callback_raw`：`(rel, line, class, kind, source, target)`（由
+  callback_facts 产出后三项，scanner 补声明定位与所在类）
 
 ### 3.1 字符串分发 RPC 的分发表写法
 
@@ -205,11 +212,29 @@ class MyFacts(FactsHooks):
 gshare.consts→gserver.sconst，1686 个文件混用，实测不归一则同事件
 订阅裂成两半）。
 
+### 3.3 声明式约定回调
+
+框架若由类体声明动态调用命名回调，只在 custom 识别具体语法：
+
+```python
+class MyFacts(FactsHooks):
+    def callback_facts(self, stmt, ctx):
+        # Declare('state', ...) -> _on_set_state(old)
+        name = parse_declaration_name(stmt)
+        if name is None:
+            return []
+        return [('PROPERTY', name, '_on_set_%s' % name)]
+```
+
+core 将 `kind` 作为结果标签（如 `PROPERTY-INFERRED`），并仅在声明类与
+目标方法类属于同类、继承链或共享精确 `@Components` 宿主时成边。没有
+共同宿主证据的同名方法直接丢弃，避免跨玩法误连。
+
 ### 参考：孵化案例的四类习语（真实 custom/facts.py 的抽象）
 
 | 习语 | 事实 | 换框架时的对应物 |
 | --- | --- | --- |
-| `Property("x", Type)` 类体声明 | attr（第二参数直接是类型名） | 任意声明式属性 |
+| `Property("x", Type)` 类体声明 | attr + callback_raw（`_on_set_x`） | 任意声明式属性/动态回调 |
 | `genv.X = self` | global_assign | 任意全局命名空间注入 |
 | `@Components(A, mod.B, *pkg.importall())` | comp_raw 三形态 | 任意组合/注入装饰器 |
 | `{Host}Member` 命名约定 | importall_members 钩子 | 你的组件命名规则 |
@@ -229,7 +254,8 @@ from qcodemap.store import Store
 cfg = cmod.load_config()
 store = Store(cfg.db_path)
 rows = store.con.execute(
-    'SELECT host, comp, comp_file FROM comp WHERE comp=?', ('MyComp',)).fetchall()
+    'SELECT host, host_file, comp, comp_file FROM comp WHERE comp=?',
+    ('MyComp',)).fetchall()
 ```
 
 ### 4.2 新增 CLI 子命令

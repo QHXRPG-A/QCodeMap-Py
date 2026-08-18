@@ -47,6 +47,13 @@ def main():
         {'jsonrpc': '2.0', 'id': 5, 'method': 'ping'},
         {'jsonrpc': '2.0', 'id': 6, 'method': 'tools/call',
          'params': {'name': 'qcodemap_no_such_tool', 'arguments': {}}},
+        {'jsonrpc': '2.0', 'id': 7, 'method': 'tools/call',
+         'params': {'name': 'qcodemap_blast_radius',
+                    'arguments': {'files': 'gclient/framework/util/replay_util.py',
+                                  'depth': 1}}},
+        {'jsonrpc': '2.0', 'id': 8, 'method': 'tools/call',
+         'params': {'name': 'qcodemap_blast_radius',
+                    'arguments': {'mode': 'page', 'limit': 201}}},
     ]
     resps = _rpc(msgs)
     by_id = {r.get('id'): r for r in resps}
@@ -76,23 +83,40 @@ def main():
         failed.append('ping 应答异常')
     if by_id.get(6, {}).get('error', {}).get('code') != -32602:
         failed.append('未知工具应回 -32602')
+    blast = json.loads(by_id[7]['result']['content'][0]['text'])
+    if blast.get('mode') != 'summary' or 'direct_callers' in blast:
+        failed.append('MCP blast 默认应为 summary: %s' % blast.keys())
+    if not by_id[8].get('result', {}).get('isError'):
+        failed.append('blast 非法分页参数应返回 tool isError')
 
     # 真子进程冒烟：python -m qcodemap mcp 应起来并应答 initialize
+    child_env = os.environ.copy()
+    child_env.pop('PYTHONUTF8', None)
+    child_env.pop('PYTHONIOENCODING', None)
     p = subprocess.Popen([sys.executable, '-m', 'qcodemap', 'mcp'],
                          cwd=PROJECT, stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                         text=True, encoding='utf-8')
+                         text=True, encoding='utf-8', env=child_env)
+    sub_ok = utf8_ok = False
+    line = tools_line = ''
     try:
         p.stdin.write(json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
                                   'params': {}}) + '\n')
+        p.stdin.write(json.dumps({'jsonrpc': '2.0', 'id': 2,
+                                  'method': 'tools/list'}) + '\n')
         p.stdin.flush()
         line = p.stdout.readline()
         sub_ok = json.loads(line).get('result', {}).get('serverInfo', {}).get(
             'name') == 'qcodemap'
+        tools_line = p.stdout.readline()
+        sub_tools = json.loads(tools_line).get('result', {}).get('tools', [])
+        utf8_ok = any('↔' in tool.get('description', '') for tool in sub_tools)
     finally:
         p.kill()
     if not sub_ok:
         failed.append('子进程模式 initialize 失败: %.80s' % line)
+    if not utf8_ok:
+        failed.append('无 PYTHONUTF8 环境时 tools/list UTF-8 输出失败')
 
     if failed:
         print('FAIL:')

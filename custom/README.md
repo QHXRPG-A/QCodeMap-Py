@@ -7,7 +7,7 @@ QCodeMap 核心引擎（`qcodemap/`）项目无关；本目录是它与具体代
 | 文件 | 作用 | 何时需要 |
 | --- | --- | --- |
 | `config.py` | 项目档案：索引范围（ROOT / TARGETS / EXCLUDE_* / INCLUDE_PATHS 等） | 首次使用建议建，也可用 CLI `--root/--targets` 代替 |
-| `facts.py` | 框架习语钩子：声明式属性、组件注册、运行时全局注入等语义事实的提取规则 | 项目有动态语义习语才需要（纯 plain Python 可省） |
+| `facts.py` | 框架习语钩子：声明式属性、组件注册、运行时全局注入、RPC/事件/约定回调等事实提取规则 | 项目有动态语义习语才需要（纯 plain Python 可省） |
 | `seeds.py` | 人工类型种子：ast 静态扫不出的返回类型/属性类型 | 按需补充 |
 
 最小 `config.py` 模板：

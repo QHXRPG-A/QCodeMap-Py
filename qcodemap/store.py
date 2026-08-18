@@ -11,7 +11,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 DDL = '''
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS defs(file TEXT, line INT, class TEXT, name TEXT);
 CREATE INDEX IF NOT EXISTS idx_defs_name ON defs(name);
 CREATE TABLE IF NOT EXISTS classes(file TEXT, name TEXT, bases TEXT, line INT);
 CREATE INDEX IF NOT EXISTS idx_classes_name ON classes(name);
-CREATE TABLE IF NOT EXISTS imports(file TEXT, module TEXT, name TEXT, alias TEXT);
+CREATE TABLE IF NOT EXISTS imports(
+    file TEXT, module TEXT, name TEXT, alias TEXT, line INT, scope TEXT);
 CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file);
 CREATE TABLE IF NOT EXISTS attr(file TEXT, class TEXT, attr TEXT, type TEXT);
 CREATE INDEX IF NOT EXISTS idx_attr_class ON attr(class);
@@ -33,7 +34,7 @@ CREATE TABLE IF NOT EXISTS global_assign(base TEXT, attr TEXT, class TEXT, file 
 CREATE INDEX IF NOT EXISTS idx_global ON global_assign(base, attr);
 CREATE TABLE IF NOT EXISTS ret(module TEXT, func TEXT, type TEXT, file TEXT);
 CREATE TABLE IF NOT EXISTS comp_raw(file TEXT, host TEXT, kind TEXT, value TEXT);
-CREATE TABLE IF NOT EXISTS comp(host TEXT, comp TEXT, comp_file TEXT);
+CREATE TABLE IF NOT EXISTS comp(host TEXT, host_file TEXT, comp TEXT, comp_file TEXT);
 CREATE INDEX IF NOT EXISTS idx_comp_host ON comp(host);
 CREATE TABLE IF NOT EXISTS rpc(file TEXT, line INT, chan TEXT, method TEXT, stub TEXT);
 CREATE INDEX IF NOT EXISTS idx_rpc_method ON rpc(method);
@@ -41,6 +42,9 @@ CREATE INDEX IF NOT EXISTS idx_rpc_file ON rpc(file);
 CREATE TABLE IF NOT EXISTS pubsub(file TEXT, line INT, side TEXT, event TEXT, func TEXT, cls TEXT);
 CREATE INDEX IF NOT EXISTS idx_pubsub_event ON pubsub(event);
 CREATE INDEX IF NOT EXISTS idx_pubsub_file ON pubsub(file);
+CREATE TABLE IF NOT EXISTS callback_raw(
+    file TEXT, line INT, class TEXT, kind TEXT, source TEXT, target TEXT);
+CREATE INDEX IF NOT EXISTS idx_callback_target ON callback_raw(target);
 CREATE TABLE IF NOT EXISTS edges(
     name TEXT, def_file TEXT, def_line INT, kind TEXT, payload TEXT,
     PRIMARY KEY(name, def_file, def_line, kind));
@@ -48,7 +52,7 @@ CREATE TABLE IF NOT EXISTS edges(
 
 # file 列直接存路径、可直接级联删除的表（names 走 file_id 单独处理）
 CASCADE_TABLES = ('defs', 'classes', 'imports', 'attr', 'global_assign',
-                  'comp_raw', 'ret', 'rpc', 'pubsub')
+                  'comp_raw', 'ret', 'rpc', 'pubsub', 'callback_raw')
 
 
 class Store(object):
@@ -118,7 +122,8 @@ class Store(object):
                                  [(n, fid, ln, col) for (n, ln, col) in rows['names']])
         # 其余事实表行 = 完整表行；列数以 DDL 为准，按首行宽度生成占位符
         for table in ('defs', 'classes', 'imports', 'attr',
-                      'global_assign', 'ret', 'comp_raw', 'rpc', 'pubsub'):
+                      'global_assign', 'ret', 'comp_raw', 'rpc', 'pubsub',
+                      'callback_raw'):
             data = rows.get(table)
             if data:
                 marks = ','.join('?' * len(data[0]))

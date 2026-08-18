@@ -83,10 +83,16 @@ def get_file_context(store, cfg, file, json_out=True):
     attr = [{'class': c, 'attr': a, 'type': t} for (c, a, t) in store.con.execute(
         'SELECT class, attr, type FROM attr WHERE file=? ORDER BY class, attr',
         (file,))]
-    comps = [{'host': h, 'comp': cp, 'comp_file': cf}
-             for (h, cp, cf) in store.con.execute(
-                 'SELECT host, comp, comp_file FROM comp WHERE comp_file=? '
+    comps = [{'host': h, 'host_file': hf, 'comp': cp, 'comp_file': cf}
+             for (h, hf, cp, cf) in store.con.execute(
+                 'SELECT host, host_file, comp, comp_file FROM comp WHERE comp_file=? '
                  'ORDER BY host', (file,))]
+    callbacks = [
+        {'line': ln, 'class': cls, 'kind': kind, 'source': source,
+         'target': target}
+        for ln, cls, kind, source, target in store.con.execute(
+            'SELECT line,class,kind,source,target FROM callback_raw WHERE file=? '
+            'ORDER BY line', (file,))]
 
     cov = st._coverage(store, [file], len(imports) + len(importers),
                        len(external))
@@ -97,7 +103,8 @@ def get_file_context(store, cfg, file, json_out=True):
         'imports': imports, 'external': external,
         'importers': importers, 'importer_count': len(importers),
         'hub': is_hub, 'importers_indegree': n_imp,
-        'facts': {'attr': attr, 'comp_register': comps},
+        'facts': {'attr': attr, 'comp_register': comps,
+                  'callbacks': callbacks},
         'coverage': cov,
         'elapsed': round(time.time() - t0, 3),
     }
@@ -115,7 +122,8 @@ def get_file_context(store, cfg, file, json_out=True):
         lines.append('    def %s' % ('%s.%s' % (d['class'], d['name'])
                                      if d['class'] else d['name']))
     if attr:
-        lines.append('  属性事实 %d 条；组件注册 %d 条' % (len(attr), len(comps)))
+        lines.append('  属性事实 %d 条；组件注册 %d 条；约定回调 %d 条'
+                     % (len(attr), len(comps), len(callbacks)))
     return '\n'.join(lines)
 
 

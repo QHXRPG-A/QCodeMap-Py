@@ -4,8 +4,8 @@
 约定：
 - 所有方法允许缺省实现（返回 None / []），core 回退到通用规则；
 - 事实行 = (表名, 行元组)，表名限定 attr / global_assign / comp_raw，
-  行结构必须与 store 对应表的列一致（见 store.DDL）；rpc/pubsub 钩子
-  返回裸元组，rel/line 等定位列由 scanner 补齐；
+  行结构必须与 store 对应表的列一致（见 store.DDL）；rpc/pubsub/callback
+  钩子返回裸元组，rel/line 等定位列由 scanner 补齐；
 - 伪类型名中含 '.' 且前段是已知全局对象名时，视为运行时全局引用
   （如 'genv.space'），由 resolver 查 global_assign(base, attr) 还原类型，
   core 不硬编码任何具体全局名——哪些名字算全局对象由提取器自己决定。
@@ -81,5 +81,14 @@ class FactsHooks(object):
         归一成「模块路径.常量名」（如 gclient...events.ON_X），保证订阅
         与发布两侧不同 import 写法可 join。装饰器 Call（@ListenTo(X)）
         同样经本钩子访问；返回 [] 走通用规则。
+        """
+        return []
+
+    def callback_facts(self, stmt, ctx):
+        """类体声明语句 -> [(kind, source, target), ...]。
+
+        用于声明式框架约定产生的动态回调边。kind 是供结果分级显示的
+        稳定类型名，source 是声明项，target 是目标方法名。core 只负责
+        保存和按类/继承/@Components 共同宿主验证，不认识具体框架语法。
         """
         return []
