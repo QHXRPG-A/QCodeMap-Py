@@ -19,7 +19,8 @@ PROJECT_DIR = PKG_DIR.parent
 
 # custom/config.py 里可出现的配置键（大小写敏感）
 KNOWN_KEYS = ('ROOT', 'TARGETS', 'EXCLUDE_DIRS', 'EXCLUDE_FILES',
-              'INCLUDE_PATHS', 'NAMES_DOWNSAMPLE_PREFIXES', 'DB_PATH')
+              'INCLUDE_PATHS', 'NAMES_DOWNSAMPLE_PREFIXES', 'DB_PATH',
+              'RPC_CHANNELS')
 
 
 class Config(object):
@@ -35,6 +36,7 @@ class Config(object):
         self.db_path = defaults.DB_PATH or str(PROJECT_DIR / 'cache' / 'qcodemap.db')
         self.ret_seeds = {}
         self.attr_seeds = {}
+        self.rpc_channels = {}  # 通道代码 -> 显示名（rpc-refs 输出用）
         self.hooks = None  # FactsHooks 实例；None = 无框架钩子，仅通用事实
         self.custom_dir = None
 
@@ -70,6 +72,8 @@ def _apply_custom_config(cfg, mod):
             cfg.include_paths = [str(p).replace('\\', '/') for p in (val or ())]
         elif key == 'NAMES_DOWNSAMPLE_PREFIXES':
             cfg.names_downsample = [str(p).replace('\\', '/') for p in (val or ())]
+        elif key == 'RPC_CHANNELS':
+            cfg.rpc_channels = dict(val or {})
         elif key == 'DB_PATH':
             cfg.db_path = str(val)
 

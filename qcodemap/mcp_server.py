@@ -17,6 +17,7 @@ from qcodemap import build as build_mod
 from qcodemap import config as config_mod
 from qcodemap import context as ctx_mod
 from qcodemap import resolve as rmod
+from qcodemap import rpc_refs as rpc_mod
 from qcodemap import structure as st_mod
 from qcodemap.store import Store
 
@@ -183,6 +184,16 @@ def _tool_blast(args):
     return out
 
 
+def _tool_rpc_refs(args):
+    cfg = config_mod.load_config()
+    store = Store(cfg.db_path)
+    try:
+        return rpc_mod.rpc_refs(store, cfg, args['method'],
+                                stub=args.get('stub'), json_out=True)
+    finally:
+        store.close()
+
+
 def _tool_find_file(args):
     cfg = config_mod.load_config()
     store = Store(cfg.db_path)
@@ -297,6 +308,20 @@ _TOOLS = [
                                        'depth': {'type': 'integer', 'default': 3}},
                         'required': []},
         'handler': _tool_blast,
+    },
+    {
+        'name': 'qcodemap_rpc_refs',
+        'description': 'RPC 方法名双端配对：字符串分发调用点（RPC-INFERRED，含通道'
+                       '与 stub）+ handler 定义（HANDLER）。适用于 CallServer/'
+                       'CallClient/stub 等字符串分发形态的跨端跳转。',
+        'inputSchema': {'type': 'object',
+                        'properties': {'method': {'type': 'string',
+                                                  'description': 'RPC 方法名字符串'},
+                                       'stub': {'type': 'string',
+                                                'description': '目标实体类名（可选，'
+                                                               'stub 通道精确配对用）'}},
+                        'required': ['method']},
+        'handler': _tool_rpc_refs,
     },
     {
         'name': 'qcodemap_find_file',

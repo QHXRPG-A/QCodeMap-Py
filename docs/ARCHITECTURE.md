@@ -35,9 +35,10 @@
 | `build.py` | 遍历 + mtime 增量 + pass2 组件解析 | INCLUDE_PATHS 路径级放行优先于目录名排除；include 路径内豁免文件级排除（origin 明文版） |
 | `resolve.py` | 两阶段语义验证 + callers/callees/usages + edges 缓存 | 性能敏感区，见 §4 |
 | `structure.py` | deps/importers/hubs/tree 结构四命令 | 纯 SQL + 内存 modmap，无 ast-grep；coverage 按 scope 内 parse_ok 给 partial |
-| `blast.py` | 变更影响面：变更集采集（svn st/--rev/--files）+ 调用链闭包 | 闭包复用 Resolver；超高频名只吃缓存 |
+| `blast.py` | 变更影响面：变更集采集（svn st/--rev/--files）+ 调用链闭包 | 闭包复用 Resolver；超高频名只吃缓存；RPC 边穿透（via_rpc 标注） |
+| `rpc_refs.py` | RPC 双端配对查询：rpc 表调用点 + defs 表 handler | RPC-INFERRED/HANDLER 分级；stub 精确配对优先，方法名兜底 |
 | `context.py` | agent 消费面三命令：find_file / get_file_context / context | 全查表无 ast 现扫；context 为一次性项目档案（qcodemap.context/v1） |
-| `mcp_server.py` | stdio JSON-RPC MCP server（12 工具） | 日志一律 stderr——stdout 是协议流，print 即损坏；目标文件型工具带懒刷新 |
+| `mcp_server.py` | stdio JSON-RPC MCP server（13 工具） | 日志一律 stderr——stdout 是协议流，print 即损坏；目标文件型工具带懒刷新 |
 | `custom/` | 项目定制层（config/facts/seeds 三件，仓库仅随附模板说明） | 见 CUSTOM_GUIDE |
 
 ## 3. 表结构（store.DDL）
@@ -52,6 +53,7 @@
 | `global_assign` | 运行时全局注入：genv.X = self → (base, attr, class) | 数百 |
 | `ret` | 返回类型事实：return 构造()（module/class.method 两个命名空间） | 数千 |
 | `comp_raw` / `comp` | @Components 原始行 / 解析后的 host↔comp 边 | 3831/3658 |
+| `rpc` | 字符串分发 RPC 调用点：(file, line, chan, method, stub)，stub 可 NULL | 数千（见附录 F） |
 | `edges` | 查询结果缓存（name+def+kind 主键，payload 含 mtimes 与版本） | 按查询增长 |
 | `meta` | schema 版本 / 构建统计 | - |
 
@@ -120,8 +122,22 @@ structure 按 scope（deps/importers 的目标集）给 partial 并附 issues �
 MCP 目标文件型工具（callers/callees/deps/importers/get_file_context/blast）
 查询前 drift_check：目标文件 mtime 与库内漂移 → 先增量 build（单文件亚秒）
 再查。上限 1000 文件（大目录 scope 放弃检测）。刷新走独立连接且在查询
-Store 打开之前（并发写锁库）。usages/hubs/tree/context 无明确目标文件，
-不接入（全库 stat 不成比例）。结果附 `refresh{files, elapsed}` 摘要。
+Store 打开之前（并发写锁库）。usages/hubs/tree/context/rpc_refs 无明确
+目标文件，不接入（全库 stat 不成比例）。结果附 `refresh{files, elapsed}` 摘要。
+
+### 5.9 RPC 双端配对（P3-2：字符串分发的约定边）
+孵化案例的 RPC 全部是字符串分发（`CallServer('X', ...)` / `CallClient` /
+stub 族 / Des 族），调用点无调用表达式，语义验证链路天然断在 RPC 边界。
+解法与 §5.7 同哲学——**事实数据化**：custom 分发表
+`RPC_DISPATCHERS = {attr: (chan, 方法名参数位, stub参数位)}` 描述「哪些
+方法名是分发器、方法名在第几个参数」，scanner 经第五钩子 `rpc_facts` 把
+调用点落 rpc 表（chan/method/stub 对 core 不透明）。查询侧 `rpc_refs`
+按 method 配 defs 表：stub 已知时 class==stub 的定义精确配对，其余同名
+定义列 name-only 候选；输出 RPC-INFERRED（非语义验证，约定推断）分级。
+blast 闭包对每个变更函数补查 rpc 表，远端调用点作为入边进闭包（via_rpc
+标注）并继续向上传递。已知边界：StubCaller 小写族 stub 名来自运行时
+self.stubname（rpc 行 stub=NULL，按方法名配对）；全库 1 处变量方法名
+调用跳过；响应回调链（caller/callback 变量形态）不做完整分析。
 
 ## 6. 已知边界（接手者从这里继续）
 
@@ -141,7 +157,8 @@ Store 打开之前（并发写锁库）。usages/hubs/tree/context 无明确目�
 | `test_scale.py` | 全库规模/查询/缓存指标，文件数 ±1% 容差 | 增量秒级（--rebuild 全量） |
 | `test_structure.py` | 四命令输出正确性 + hubs 锚点方向 | ~1s |
 | `test_blast.py` | 闭包命中已知边（--files 模式，不依赖 svn） | 秒级（缓存热后） |
-| `test_mcp.py` | 进程内协议全流程（12 工具）+ 真子进程冒烟 | ~10s |
+| `test_mcp.py` | 进程内协议全流程（13 工具）+ 真子进程冒烟 | ~10s |
 | `test_p4.py` | 覆盖率契约 + 三新命令 + 懒刷新（临时小库自建） | ~2s |
+| `test_rpc.py` | RPC 分发提取 + rpc-refs 配对 + blast 穿透（临时小库） | ~2s |
 
-动任何 qcodemap/ 代码后六个全跑；只动 custom/ 跑 feasibility + scale 即可。
+动任何 qcodemap/ 代码后七个全跑；只动 custom/ 跑 feasibility + scale 即可。

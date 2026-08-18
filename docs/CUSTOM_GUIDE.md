@@ -60,7 +60,7 @@ seeds：custom 键覆盖内置同键种子（dict 合并语义）
 custom 文件按路径 importlib 动态加载（`qcodemap_custom_config` 等模块名），
 缺失哪个文件就用哪个默认——所以三个文件全部可选。
 
-## 3. 扩展框架语义：FactsHooks 四个钩子
+## 3. 扩展框架语义：FactsHooks 五个钩子
 
 先在目标代码里确认习语的真实形态（`grep -n` 看实际写法），再实现：
 
@@ -85,6 +85,12 @@ class MyFacts(FactsHooks):
     def importall_members(self, host):
         """importall 场景：宿主对应的组件类名列表。
         典型：宿主组件类命名规则 -> [host + 'Member']（孵化案例的约定）。"""
+
+    def rpc_facts(self, call, ctx):
+        """函数体内任意 Call 节点 -> [(chan, method, stub), ...]。
+        字符串分发 RPC/远端调用提取：按分发表匹配 attr 与参数位，返回
+        (通道名, 方法名字符串, 目标类名或 None)。详见孵化案例的
+        RPC_DISPATCHERS 写法与 §3.1。"""
 ```
 
 事实行必须与 store 表列一致：
@@ -92,6 +98,46 @@ class MyFacts(FactsHooks):
 - `global_assign`：`(base_name, attr, class, rel)`
 - `comp_raw`：`(rel, host, kind, value)`，kind ∈ ref/attr/importall
   （ref=同文件/裸名；attr=mod.Cls 前缀；importall=*pkg.importall() 星调用）
+- `rpc`：`(rel, line, chan, method, stub)`（stub 可 None；由 rpc_facts
+  钩子产出，scanner 负责补 rel/line）
+
+### 3.1 字符串分发 RPC 的分发表写法
+
+目标项目的 RPC 若是 `x.Dispatch('Method', ...)` 形态（方法名是字符串
+参数，无调用表达式），用 `rpc_facts` 钩子 + 一张分发表覆盖：
+
+```python
+# {attr 名: (通道名, 方法名参数位 0 基, stub 参数位或 None)}
+RPC_DISPATCHERS = {
+    'CallServer': ('C2S', 0, None),          # self.CallServer('X', ...)
+    'CallClient': ('S2C', 0, None),
+    'CallShardStubHostnum': ('STUB', 3, 2),  # (host, key, stub, rpc)
+}
+
+class MyFacts(FactsHooks):
+    def rpc_facts(self, call, ctx):
+        func = call.func
+        if not (isinstance(func, ast.Attribute)
+                and func.attr in RPC_DISPATCHERS):
+            return []
+        chan, m_idx, s_idx = RPC_DISPATCHERS[func.attr]
+        args = call.args
+        if len(args) <= m_idx:
+            return []
+        marg = args[m_idx]
+        if not (isinstance(marg, ast.Constant) and isinstance(marg.value, str)):
+            return []   # 变量方法名跳过
+        stub = None
+        if s_idx is not None and len(args) > s_idx:
+            sarg = args[s_idx]
+            if isinstance(sarg, ast.Constant) and isinstance(sarg.value, str):
+                stub = sarg.value
+        return [(chan, marg.value, stub)]
+```
+
+配对查询用 `qcodemap rpc-refs <方法名> [--stub X]`；噪音通道删表内
+单行即降级。参数位以目标项目分发器的**真实签名**为准（grep 定义处核实，
+勿凭调用样例推断——同一族可能带不同前缀参数）。
 
 ### 参考：孵化案例的四类习语（真实 custom/facts.py 的抽象）
 
@@ -101,6 +147,7 @@ class MyFacts(FactsHooks):
 | `genv.X = self` | global_assign | 任意全局命名空间注入 |
 | `@Components(A, mod.B, *pkg.importall())` | comp_raw 三形态 | 任意组合/注入装饰器 |
 | `{Host}Member` 命名约定 | importall_members 钩子 | 你的组件命名规则 |
+| `CallServer('X')` 等 7 族字符串分发 | rpc（RPC_DISPATCHERS 分发表） | 任意字符串分发 RPC/消息总线 |
 
 ## 4. 扩展查询能力
 

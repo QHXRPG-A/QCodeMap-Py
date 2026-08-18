@@ -4,12 +4,12 @@
 > 核心项目无关）。孵化案例为 Messiah 游戏项目（内部代码库），本文实测数据
 > 与路径示例均出自该案例。
 
-- 版本：v0.7（开源化：文档转为通用 Python 项目定位、孵化案例脱敏；功能同 v0.6）
+- 版本：v0.8（P3-2 落地：RPC 双端跳转 rpc-refs + blast 穿透；开源化 v0.7 功能同 v0.6）
 - 日期：2026-08-18
-- 状态：**P0~P2 已完成**（实测见附录 C/D；索引范围已扩至 gclient/data、
-  gserver/data（含 origin 明文版）与 classutils.py）；**P4 第一轮
-  （§2.2 第 1/2/3/5 项）已完成**，剩余 diff（第 4 项）与 HTTP serve
-  （第 6 项，有真实消费场景再做）；P3 语义扩展并行可做
+- 状态：**P0~P2 已完成**（实测见附录 C/D）；**P4 第一轮（§2.2 第 1/2/3/5 项）
+  已完成**（附录 E），剩余 diff（第 4 项）与 HTTP serve（第 6 项，有真实
+  消费场景再做）；**P3-2 RPC 双端跳转已完成**（附录 F），P3 其余三项
+  （事件配对表/种子自动化/attr-refs）按需并行
 - 文档：[README.md](README.md)（快速上手）·
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（模块/数据流/决策记录）·
   [docs/CUSTOM_GUIDE.md](docs/CUSTOM_GUIDE.md)（二次开发指南）
@@ -115,6 +115,11 @@
 - pubsub 事件配对表：`ListenTo(ON_X)` ↔ `Broadcast/Pub(ON_X)` 常量 join，
   补静态不可达的事件分发边（jedi 版同样做不到的天花板）。
 - RPC 桩↔handler 约定映射（客户端 stub 名 ↔ 服务端注册）。
+  ——**已完成**（2026-08-18，P3-2，见附录 F）：rpc 事实表 + 第五钩子
+  `rpc_facts`（分发表在 custom/facts.py，7 通道族）+ `rpc-refs` 命令/
+  MCP 工具（RPC-INFERRED/HANDLER 分级配对）+ blast-radius 闭包穿透
+  RPC 边界。注意：本项目 RPC 是字符串分发（`CallServer('X')` 等）而非
+  显式桩类，配对按方法名（stub 类名已知时精确配对）。
 - 种子事实的采集自动化：`Space.GetEntity` 等返回类型目前靠人工种子，
   扩展为「docstring 类型标注 + 调用方语境投票」半自动采集。
 - attr-refs 命令（属性版 callers）：cur_titles 实测暴露的缺口——attr 原始
@@ -314,3 +319,44 @@ P4 第一轮落地中的关键实现点：
   再显式传入 blast，省一次 svn st 子进程调用；rev 模式对历史版本不刷新。
 - **importers 的 coverage scope 语义**：scope=被引用目标集而非引用方全集
   （与 deps 的「查询目标集」口径一致），目标文件正常即 complete。
+
+## 附录 F：P3-2 RPC 双端跳转实测（2026-08-18）
+
+通道捕获量级（rpc 表，全量重建 268s）：
+
+| 通道 | rpc 行数 | 对照探索预估 | 说明 |
+| --- | --- | --- | --- |
+| C2S（CallServer 族） | 2004 | ~1520+ | 探索只数 `.CallServer(`；同形态 Act/AnyTime/GameLogic 一并捕获，合理偏高 |
+| S2C（CallClient） | 710 | ~757 | 排除 debug.py GM 通道与变量回调首参，合理偏低 |
+| STUB（stub 族） | 287 | ~340 | 小写族无字面量方法名（变量）的自然跳过 |
+| MAILBOX（call 族） | 195 | ~140+ | 常量回调名 |
+| DES | 10 | 12 | 全部命中 |
+| 合计 | 3206 | - | - |
+
+四案例真库验证全部命中：
+1. `rpc-refs SetPlayerAimState`：客户端 fps_state_fsm.py:336（StateAim.OnEnter）
+   ↔ 服务端 combat_avatar.py:719（CombatAvatar.SetPlayerAimState），C2S；
+2. `rpc-refs ObtainClan --stub ClanStub`：clan_caller.py:34 ↔ clan_stub.py:135，
+   stub 精确配对（CallShardStubHostnum 双字面量提取）；
+3. `rpc-refs ServerShowMessage`：服务端 3 处调用 ↔ 客户端 cimp_combat.py:238
+   handler，S2C 反向；
+4. `rpc-refs NotifyForceRecycle`：imp_clan_base/imp_race_base 两处 DES 调用 ↔
+   clan_stub/race_stub 两 handler（同名双定义全部列出）。
+
+blast 穿透实测：`blast-radius --files gserver/entities/clan_stub.py --depth 1`
+的直接调用方含 3 条 via_rpc 入边，其中 CreateClan 的调用方在**客户端**
+（gclient/gamesystem/entities/avatarmembers/cimp_clan.py:135）——影响面
+首次穿越双端。
+
+落地关键点与坑：
+- **参数位以分发器定义为准，勿凭调用样例推断**：CallShardStubHostnum
+  签名 (hostnum, shardkey, stubname, rpc_method) 的 stub=arg2/rpc=arg3，
+  首版凭样例写成 2/1 位，test_rpc 当场抓出（'key' 被当成方法名）；
+- **stub 分片后缀归一**：'ClanStub@2' 落库前 split('@')[0]，配对不受
+  分片实例名影响；
+- **RPC 入边与语义入边同去重键**：(file, line) 维度，blast 闭包里两类
+  入边共用 seen_direct/seen_trans；
+- **handler 不依赖 @rpc_method 装饰器**：ObtainClan 等 stub 方法无装饰器，
+  配对一律走 defs 表按方法名（stub 已知时精确）；
+- **ast 失败文件的 RPC 调用自动缺席**（如 cimp_replay.py 的 4 处
+  CallServerNew），note 提示走 usages 补查。

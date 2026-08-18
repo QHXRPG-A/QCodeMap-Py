@@ -11,7 +11,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DDL = '''
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -35,13 +35,17 @@ CREATE TABLE IF NOT EXISTS ret(module TEXT, func TEXT, type TEXT, file TEXT);
 CREATE TABLE IF NOT EXISTS comp_raw(file TEXT, host TEXT, kind TEXT, value TEXT);
 CREATE TABLE IF NOT EXISTS comp(host TEXT, comp TEXT, comp_file TEXT);
 CREATE INDEX IF NOT EXISTS idx_comp_host ON comp(host);
+CREATE TABLE IF NOT EXISTS rpc(file TEXT, line INT, chan TEXT, method TEXT, stub TEXT);
+CREATE INDEX IF NOT EXISTS idx_rpc_method ON rpc(method);
+CREATE INDEX IF NOT EXISTS idx_rpc_file ON rpc(file);
 CREATE TABLE IF NOT EXISTS edges(
     name TEXT, def_file TEXT, def_line INT, kind TEXT, payload TEXT,
     PRIMARY KEY(name, def_file, def_line, kind));
 '''
 
 # file 列直接存路径、可直接级联删除的表（names 走 file_id 单独处理）
-CASCADE_TABLES = ('defs', 'classes', 'imports', 'attr', 'global_assign', 'comp_raw', 'ret')
+CASCADE_TABLES = ('defs', 'classes', 'imports', 'attr', 'global_assign',
+                  'comp_raw', 'ret', 'rpc')
 
 
 class Store(object):
@@ -109,11 +113,12 @@ class Store(object):
         if rows.get('names'):
             self.con.executemany('INSERT INTO names VALUES(?,?,?,?)',
                                  [(n, fid, ln, col) for (n, ln, col) in rows['names']])
+        # 其余事实表行 = 完整表行；列数以 DDL 为准，按首行宽度生成占位符
         for table in ('defs', 'classes', 'imports', 'attr',
-                      'global_assign', 'ret', 'comp_raw'):
+                      'global_assign', 'ret', 'comp_raw', 'rpc'):
             data = rows.get(table)
             if data:
-                marks = ','.join('?' * 4)
+                marks = ','.join('?' * len(data[0]))
                 self.con.executemany('INSERT INTO %s VALUES(%s)' % (table, marks), data)
 
     # ---- 统计 ----

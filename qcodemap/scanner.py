@@ -63,7 +63,7 @@ def scan_file(rel, path, hooks=None, downsample=False):
     text = read_source(path)
     r = {'names': [], 'defs': [], 'classes': [], 'imports': [],
          'attr': [], 'global_assign': [], 'ret': [], 'comp_raw': [],
-         'parse_ok': True}
+         'rpc': [], 'parse_ok': True}
     seen_names = set() if downsample else None
     for i, line in enumerate(text.splitlines(), 1):
         # 剔除 bytes 字面量后再 token 化（bindict 表格产物的伪 token 源）
@@ -91,7 +91,7 @@ def scan_file(rel, path, hooks=None, downsample=False):
             _scan_import(stmt, r, rel, mod)
         elif isinstance(stmt, FUNC_NODES):
             r['defs'].append((rel, stmt.lineno, None, stmt.name))
-            _scan_ret(stmt, r, rel, mod, None)
+            _scan_function(stmt, r, rel, mod, None, hooks)
     return r
 
 
@@ -146,7 +146,7 @@ def _scan_class(cd, r, rel, mod, hooks):
             continue
         if isinstance(sub, FUNC_NODES):
             r['defs'].append((rel, sub.lineno, cd.name, sub.name))
-            _scan_ret(sub, r, rel, mod, cd.name)
+            _scan_function(sub, r, rel, mod, cd.name, hooks)
         fact = hooks.class_stmt_fact(sub, cctx)
         if fact:
             r[fact[0]].append(fact[1])
@@ -183,15 +183,30 @@ def _scan_self_assign(st, r, rel, cctx, hooks):
             r['attr'].append((rel, cctx.cls, tgt.attr, typ))
 
 
-def _scan_ret(fn, r, rel, mod, cls):
-    """函数体内 return 构造() -> ret 事实（模块函数与方法的命名空间不同）。"""
+def _scan_function(fn, r, rel, mod, cls, hooks):
+    """函数体一次遍历双产出：return 构造() -> ret；Call 节点 -> rpc 钩子。
+
+    模块函数与方法的 ret 命名空间不同；rpc 钩子不分命名空间（chan 已含方向）。
+    """
     if cls:
         func_key = '%s.%s' % (cls, fn.name)
     else:
         func_key = fn.name
-    for ret in ast.walk(fn):
-        if isinstance(ret, ast.Return) and isinstance(ret.value, ast.Call) \
-                and isinstance(ret.value.func, ast.Name):
-            t = ret.value.func.id
+    if hooks is None:
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Return) and isinstance(node.value, ast.Call) \
+                    and isinstance(node.value.func, ast.Name):
+                t = node.value.func.id
+                if t not in BUILTIN_CTORS:
+                    r['ret'].append((mod, func_key, t, rel))
+        return
+    fctx = FactContext(rel, mod, cls)
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Call) \
+                and isinstance(node.value.func, ast.Name):
+            t = node.value.func.id
             if t not in BUILTIN_CTORS:
                 r['ret'].append((mod, func_key, t, rel))
+        elif isinstance(node, ast.Call):
+            for (chan, method, stub) in hooks.rpc_facts(node, fctx):
+                r['rpc'].append((rel, node.lineno, chan, method, stub))

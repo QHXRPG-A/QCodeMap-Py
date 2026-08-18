@@ -228,22 +228,60 @@ def _impact_closure(store, cfg, funcs, depth):
             out = {'items': items} if items is not None else None
         else:
             out = rmod.callers(store, cfg, fn['file'], fn['func'], resolver=resolver)
-        if out is None:
-            continue
-        for item in out['items']:
-            if item['level'] != 'VERIFIED':
-                continue
+        if out is not None:
+            for item in out['items']:
+                if item['level'] != 'VERIFIED':
+                    continue
+                n_edges += 1
+                if n_edges > MAX_EDGES:
+                    truncated = True
+                    frontier = []
+                    break
+                key = (item['file'], item['line'])
+                entry = {
+                    'target': ('%s.%s' % (fn['class'], fn['func'])) if fn['class'] else fn['func'],
+                    'caller': item['caller'], 'caller_file': item['file'],
+                    'caller_line': item['line'],
+                }
+                if level == 0:
+                    if key not in seen_direct:
+                        seen_direct.add(key)
+                        direct.append(entry)
+                else:
+                    if key not in seen_trans:
+                        seen_trans.add(key)
+                        transitive.append({'caller_loc': '%s:%s in %s'
+                                           % (item['file'], item['line'], item['caller']),
+                                           'via': entry['target']})
+                # 调用点外层函数：查其真实定义（class+name 维度）后继续向上
+                caller_cls, caller_func = _split_display(item['caller'])
+                if not caller_func:
+                    continue
+                enqueue({'class': caller_cls, 'func': caller_func, 'file': item['file']},
+                        level + 1)
+        # RPC 边穿透：变更/途经函数是 handler（名匹配 rpc.method，stub 不符或
+        # NULL 均算），其远端调用点进闭包并继续向上（RPC-INFERRED 入边）
+        rpc_rows = store.con.execute(
+            'SELECT file, line, chan, stub FROM rpc WHERE method=?',
+            (fn['func'],)).fetchall()
+        for (rf, rln, chan, rstub) in rpc_rows:
+            if fn['class'] and rstub and rstub != fn['class']:
+                continue  # stub 已知且指向别的类，不是本 handler 的边
+            if rf == fn['file'] and rln == fn.get('line'):
+                continue  # 自身文件内的定义行兜底（rpc 行应为调用点，防御）
             n_edges += 1
             if n_edges > MAX_EDGES:
                 truncated = True
                 frontier = []
                 break
-            key = (item['file'], item['line'])
-            entry = {
-                'target': ('%s.%s' % (fn['class'], fn['func'])) if fn['class'] else fn['func'],
-                'caller': item['caller'], 'caller_file': item['file'],
-                'caller_line': item['line'],
-            }
+            key = (rf, rln)
+            if resolver is None:
+                resolver = rmod.Resolver(store, cfg)
+            rcls, rfunc = resolver._enclosing_of(rf, rln)
+            target = ('%s.%s' % (fn['class'], fn['func'])) if fn['class'] else fn['func']
+            entry = {'target': target, 'caller': rmod._display(rcls, rfunc),
+                     'caller_file': rf, 'caller_line': rln,
+                     'via_rpc': chan}
             if level == 0:
                 if key not in seen_direct:
                     seen_direct.add(key)
@@ -252,14 +290,10 @@ def _impact_closure(store, cfg, funcs, depth):
                 if key not in seen_trans:
                     seen_trans.add(key)
                     transitive.append({'caller_loc': '%s:%s in %s'
-                                       % (item['file'], item['line'], item['caller']),
-                                       'via': entry['target']})
-            # 调用点外层函数：查其真实定义（class+name 维度）后继续向上
-            caller_cls, caller_func = _split_display(item['caller'])
-            if not caller_func:
-                continue
-            enqueue({'class': caller_cls, 'func': caller_func, 'file': item['file']},
-                    level + 1)
+                                       % (rf, rln, entry['caller']),
+                                       'via': '%s(rpc:%s)' % (target, chan)})
+            if rfunc:
+                enqueue({'class': rcls, 'func': rfunc, 'file': rf}, level + 1)
     return direct, transitive, truncated
 
 

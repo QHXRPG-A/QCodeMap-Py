@@ -55,3 +55,12 @@ class FactsHooks(object):
         典型用途：项目命名约定 -> [host + 'Member']。
         """
         return []
+
+    def rpc_facts(self, call, ctx):
+        """函数体内任意 Call 节点 -> [(chan, method, stub), ...]。
+
+        用于字符串分发的 RPC/远端调用习语：chan=通道名（如 C2S/S2C/STUB，
+        对 core 不透明），method=远端方法名字符串，stub=目标实体类名或 None。
+        core 对每个函数体内的 Call 节点各调用一次；返回 [] 走通用规则。
+        """
+        return []

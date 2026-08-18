@@ -49,6 +49,13 @@ def main(argv=None):
     p_usages.add_argument('--limit', type=int, default=200)
     p_usages.add_argument('--json', action='store_true')
 
+    p_rpc = sub.add_parser('rpc-refs', help='RPC 方法名双端配对（调用点+handler）')
+    p_rpc.add_argument('method')
+    p_rpc.add_argument('--stub', default=None, help='限定目标实体类名（可选）')
+    p_rpc.add_argument('--root', default=None)
+    p_rpc.add_argument('--db', default=None)
+    p_rpc.add_argument('--json', action='store_true')
+
     p_deps = sub.add_parser('deps', help='文件/目录依赖了谁（文件级边）')
     p_deps.add_argument('target')
     p_deps.add_argument('--db', default=None)
@@ -159,6 +166,20 @@ def main(argv=None):
             out = blast.blast(store, cfg,
                               files=args.files.split(',') if args.files else None,
                               rev=args.rev, depth=args.depth or 99, json_out=args.json)
+        finally:
+            store.close()
+        if args.json:
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+        else:
+            print(out)
+        return 0
+    if args.cmd == 'rpc-refs':
+        from qcodemap import rpc_refs
+        from qcodemap.store import Store
+        store = Store(args.db or cfg.db_path)
+        try:
+            out = rpc_refs.rpc_refs(store, cfg, args.method, stub=args.stub,
+                                    json_out=args.json)
         finally:
             store.close()
         if args.json:
