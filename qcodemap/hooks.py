@@ -78,7 +78,7 @@ class FactsHooks(object):
 
         用于事件分发习语：side=方向名（listen/publish 约定，对 core 不
         透明），event=事件常量键。常量键建议用 ctx.imports 把 events.X
-        归一成「模块路径.常量名」（如 gclient...events.ON_X），保证订阅
+        归一成「模块路径.常量名」（如 pkg.events.ON_X），保证订阅
         与发布两侧不同 import 写法可 join。装饰器 Call（@ListenTo(X)）
         同样经本钩子访问；返回 [] 走通用规则。
         """

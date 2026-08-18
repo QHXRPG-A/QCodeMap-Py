@@ -209,7 +209,7 @@ class MyFacts(FactsHooks):
 **转发别名要归一**：若常量类存在 re-export（如 B 模块 `from A import Cls`
 后大家混用 A/B 两种前缀 import），同一事件会裂成两个键、配对率骤降——
 维护一张 `{别名前缀: 真实前缀}` 映射在 _event_key 里改写（孵化案例
-gshare.consts→gserver.sconst，1686 个文件混用，实测不归一则同事件
+share.consts→server.sconst，1686 个文件混用，实测不归一则同事件
 订阅裂成两半）。
 
 ### 3.3 声明式约定回调

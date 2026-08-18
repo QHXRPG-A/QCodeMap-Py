@@ -84,9 +84,9 @@
 
 ### 5.2 同名类并集语义（不是消歧后取一）
 `_class_files` 返回**全部**定义文件，排序「同文件 > 同目录 > 同顶层 target
-（gclient/gserver 镜像类场景）> 字典序」，方法查找沿排序依次尝试。
+（镜像目录下的同名类场景）> 字典序」，方法查找沿排序依次尝试。
 依据：@Components 是 setattr 拷贝，宿主方法来自每一个组件类；
-gclient/gserver 的 CombatAvatar 是镜像实现，调用方语境决定用哪份。
+客户端/服务端两侧的同名 Avatar 类是镜像实现，调用方语境决定用哪份。
 历史教训：早期版本消歧失败返回 None，GetTeammateInfo 的 VERIFIED 边
 从 21 掉到 6。
 
@@ -100,7 +100,7 @@ edges 缓存键含解析器行为版本（resolve.py 顶部常量）。任何影
 历史教训：修了镜像类消歧后旧缓存仍命中，VERIFIED 停在错误值。
 
 ### 5.5 表格目录专用索引策略
-gclient/data、gserver/data 的 .py 是 bindict 二进制（bytes 字面量），
+部分 data 目录下的 .py 是 bindict 二进制（bytes 字面量），
 `*_origin.py` 是其明文版本。处理链：
 - INCLUDE_PATHS 路径级放行（优先于 'data' 目录名排除）；
 - include 路径内豁免 `*_origin.py` 文件级排除（明文版才有语义可查）；
