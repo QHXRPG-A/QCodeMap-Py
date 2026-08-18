@@ -1,0 +1,12 @@
+# 索引产物（可再生，删除即重建）
+cache/
+
+# Python
+__pycache__/
+*.pyc
+
+# 项目档案不入库：custom/ 只随附 README.md 模板，
+# 各项目的 config/facts/seeds 留在本地（含孵化案例的三件）
+custom/config.py
+custom/facts.py
+custom/seeds.py

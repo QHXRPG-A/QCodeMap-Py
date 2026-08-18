@@ -1,0 +1,271 @@
+# -*- coding: utf-8 -*-
+"""blast-radius 调用链版：变更集 -> 函数级影响闭包（codemap 只能做 import 级）。
+
+三个维度：
+1. 变更函数的直接调用方（VERIFIED 边）与传递闭包（默认 3 层，防枢纽爆炸）；
+2. 变更文件的 import 级 importers（codemap 平价维度，两相对照）；
+3. 变更函数清单本身（svn diff hunk 行区间 × defs 行号的启发式 enclosing）。
+
+变更集采集与算法解耦：svn st / svn diff --summarize / 显式 --files 三种来源，
+统一归一为 [rel_path]。
+"""
+
+import re
+import subprocess
+import time
+
+from qcodemap import resolve as rmod
+from qcodemap import structure as st
+
+MAX_EDGES = 1000  # 闭包安全上限：超过即截断并在输出标注
+MAX_NAME_CANDS = 1500  # 超高频名冷验证分钟级且影响面无增量信息，只吃缓存
+
+
+def collect_svn_status(cfg):
+    """工作副本变更（svn st）：M/A 的 .py 文件。只读操作。"""
+    out = _svn(['st', cfg.root])
+    files = []
+    for line in out.splitlines():
+        if len(line) < 8:
+            continue
+        status, path = line[0], line[7:].strip()
+        if status in 'MA' and path.endswith('.py'):
+            files.append(_svn_rel(cfg, path))
+    return files
+
+
+def collect_svn_diff(cfg, rev):
+    """版本区间变更（svn diff --summarize）：返回 (rel_path -> diff 全文)。"""
+    out = _svn(['diff', '--summarize', '-r', rev, cfg.root])
+    files = []
+    for line in out.splitlines():
+        if len(line) > 8 and line[0] in 'MA' and line[8:].strip().endswith('.py'):
+            files.append(_svn_rel(cfg, line[8:].strip()))
+    return files
+
+
+def _svn(args):
+    r = subprocess.run(['svn'] + args, capture_output=True, text=True,
+                       encoding='utf-8', errors='replace', timeout=60)
+    return r.stdout or ''
+
+
+def _svn_rel(cfg, path):
+    """svn 输出的绝对/相对路径 -> 库内 rel（posix）。"""
+    p = path.replace('\\', '/')
+    root = cfg.root.replace('\\', '/')
+    if p.startswith(root):
+        p = p[len(root):]
+    return p.lstrip('/')
+
+
+def changed_functions(store, cfg, file, diff_text=None):
+    """变更文件 -> 变更函数清单。
+
+    有 diff：hunk new 侧行区间 × defs 行号（近似 enclosing，一个 def 的区间
+    到同文件下一个 def 前，标注启发式）；无 diff（--files 模式）：全部 def。
+    """
+    defs = store.con.execute(
+        'SELECT line, class, name FROM defs WHERE file=? ORDER BY line',
+        (file,)).fetchall()
+    if not defs:
+        return []
+    if diff_text is None:
+        return [{'file': file, 'class': c, 'func': n, 'line': ln, 'heuristic': False}
+                for (ln, c, n) in defs]
+    ranges = _hunk_new_ranges(diff_text)
+    result = []
+    for i, (ln, c, n) in enumerate(defs):
+        end = defs[i + 1][0] - 1 if i + 1 < len(defs) else ln + 2000
+        if any(a <= end and b >= ln for (a, b) in ranges):
+            result.append({'file': file, 'class': c, 'func': n,
+                           'line': ln, 'heuristic': True})
+    return result
+
+
+_HUNK_RE = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')
+
+
+def _hunk_new_ranges(diff_text):
+    """unified diff -> new 侧行区间 [(start, end)]（1 基闭区间，由 hunk 头给出）。"""
+    ranges = []
+    for line in diff_text.splitlines():
+        m = _HUNK_RE.match(line)
+        if m:
+            start = int(m.group(1))
+            count = int(m.group(2) or 1)
+            if count > 0:
+                ranges.append((start, start + count - 1))
+    return ranges
+
+
+def blast(store, cfg, files=None, rev=None, depth=3, use_svn_status=True,
+          json_out=False):
+    """主入口：变更集 -> 影响报告。files/rev 均未给时走 svn st。"""
+    t0 = time.time()
+    # 1. 变更集
+    if files:
+        changed = [f.replace('\\', '/') for f in files]
+        diffs = {}
+    elif rev:
+        changed = collect_svn_diff(cfg, rev)
+        diffs = {f: _svn(['diff', '-r', rev,
+                          cfg.root.rstrip('/\\') + '/' + f]) for f in changed}
+    elif use_svn_status:
+        changed = collect_svn_status(cfg)
+        diffs = {}
+    else:
+        changed = []
+        diffs = {}
+    changed = [f for f in changed if not f.startswith('cache/')]
+
+    # 2. 变更函数
+    funcs = []
+    for f in changed:
+        funcs.extend(changed_functions(store, cfg, f, diffs.get(f)))
+
+    # 3. 调用链闭包（VERIFIED 边）
+    direct, transitive, truncated = _impact_closure(store, cfg, funcs, depth)
+
+    # 4. import 级维度
+    idx = st.StructureIndex(store)
+    imp_by_file = {}
+    for f in changed:
+        dsts = set(idx.scope_files(f))
+        if not dsts:
+            continue
+        for (s, d) in idx.edges:
+            if d in dsts and s not in imp_by_file.get(f, set()) | {f}:
+                imp_by_file.setdefault(f, set()).add(s)
+
+    if json_out:
+        return {
+            'schema_version': st.SCHEMA_VERSION,
+            'changed_files': sorted(changed),
+            'changed_functions': [{'file': _func_file(store, fn), **fn} for fn in funcs],
+            'direct_callers': direct,
+            'transitive_callers': transitive,
+            'truncated': truncated,
+            'importers': {f: sorted(v) for f, v in imp_by_file.items()},
+            'elapsed': round(time.time() - t0, 3),
+        }
+    lines = ['blast-radius: 变更 %d 文件 / %d 函数, 闭包深度 %d%s'
+             % (len(changed), len(funcs), depth, '（截断）' if truncated else '')]
+    lines.append('  变更文件:')
+    for f in sorted(changed):
+        lines.append('    %s' % f)
+    lines.append('  直接调用方（VERIFIED）: %d' % len(direct))
+    for item in direct[:30]:
+        lines.append('    %s  <- %s:%s in %s'
+                     % (item['target'], item['caller_file'], item['caller_line'],
+                        item['caller']))
+    if transitive:
+        lines.append('  传递调用方（%d 层内）: %d' % (depth, len(transitive)))
+        for item in transitive[:20]:
+            lines.append('    %s  (via %s)' % (item['caller_loc'], item['via']))
+    imp_total = sum(len(v) for v in imp_by_file.values())
+    lines.append('  import 级 importers: %d' % imp_total)
+    return '\n'.join(lines)
+
+
+def _func_file(store, fn):
+    return fn.get('file', '')
+
+
+def _impact_closure(store, cfg, funcs, depth):
+    """变更函数 -> {直接, 传递} 调用方。visited 防环，MAX_EDGES 截断。
+
+    性能要点：共享一个 Resolver（callers 每次冷路径新建会全表初始化）；
+    frontier 按 (class, func, file) 去重，同名函数不重复展开。
+    """
+    direct = []
+    seen_direct = set()
+    transitive = []
+    seen_trans = set()
+    n_edges = 0
+    truncated = False
+    resolver = None
+    queued = set()
+    frontier = []
+
+    def enqueue(fn, level):
+        key = (fn['class'], fn['func'], fn.get('file'))
+        if key in queued:
+            return
+        queued.add(key)
+        frontier.append((fn, level))
+
+    for fn in funcs:
+        # 变更函数的定义限定在其文件内（--files 模式下 file 一定有值）
+        if fn.get('file'):
+            rows = store.con.execute(
+                'SELECT line FROM defs WHERE class IS ? AND name=? AND file=?',
+                (fn['class'], fn['func'], fn['file'])).fetchall()
+            targets = [(fn['file'], r[0]) for r in rows]
+        else:
+            targets = []
+        for (df, dl) in targets:
+            enqueue({'class': fn['class'], 'func': fn['func'], 'file': df}, 0)
+
+    while frontier:
+        (fn, level) = frontier.pop(0)
+        if level >= depth:
+            continue
+        if resolver is None:
+            resolver = rmod.Resolver(store, cfg)
+        # 超高频名（__init__/Create 等）：上万候选的冷验证是分钟级且对影响面
+        # 无增量信息；只吃 edges 缓存，没有缓存就跳过该节点
+        n_cands = store.con.execute(
+            'SELECT COUNT(*) FROM names WHERE name=?', (fn['func'],)).fetchone()[0]
+        if n_cands > MAX_NAME_CANDS:
+            def_line = store.con.execute(
+                'SELECT line FROM defs WHERE file=? AND name=? AND class IS ? '
+                'ORDER BY line LIMIT 1',
+                (fn['file'], fn['func'], fn['class'])).fetchone()
+            items = rmod._load_edges(store, cfg, fn['func'], fn['file'],
+                                     def_line[0] if def_line else -1, 'callers') \
+                if def_line else None
+            out = {'items': items} if items is not None else None
+        else:
+            out = rmod.callers(store, cfg, fn['file'], fn['func'], resolver=resolver)
+        if out is None:
+            continue
+        for item in out['items']:
+            if item['level'] != 'VERIFIED':
+                continue
+            n_edges += 1
+            if n_edges > MAX_EDGES:
+                truncated = True
+                frontier = []
+                break
+            key = (item['file'], item['line'])
+            entry = {
+                'target': ('%s.%s' % (fn['class'], fn['func'])) if fn['class'] else fn['func'],
+                'caller': item['caller'], 'caller_file': item['file'],
+                'caller_line': item['line'],
+            }
+            if level == 0:
+                if key not in seen_direct:
+                    seen_direct.add(key)
+                    direct.append(entry)
+            else:
+                if key not in seen_trans:
+                    seen_trans.add(key)
+                    transitive.append({'caller_loc': '%s:%s in %s'
+                                       % (item['file'], item['line'], item['caller']),
+                                       'via': entry['target']})
+            # 调用点外层函数：查其真实定义（class+name 维度）后继续向上
+            caller_cls, caller_func = _split_display(item['caller'])
+            if not caller_func:
+                continue
+            enqueue({'class': caller_cls, 'func': caller_func, 'file': item['file']},
+                    level + 1)
+    return direct, transitive, truncated
+
+
+def _split_display(display):
+    """'Class.func' -> (Class, func)；无类 -> (None, func)。"""
+    if '.' in display:
+        cls, func = display.rsplit('.', 1)
+        return cls, func
+    return None, display

@@ -1,0 +1,316 @@
+# QCodeMap 需求开发文档
+
+> 定位：**通用 Python 代码库的语义级导航工具**（框架习语经 custom/ 插拔，
+> 核心项目无关）。孵化案例为 Messiah 游戏项目（内部代码库），本文实测数据
+> 与路径示例均出自该案例。
+
+- 版本：v0.7（开源化：文档转为通用 Python 项目定位、孵化案例脱敏；功能同 v0.6）
+- 日期：2026-08-18
+- 状态：**P0~P2 已完成**（实测见附录 C/D；索引范围已扩至 gclient/data、
+  gserver/data（含 origin 明文版）与 classutils.py）；**P4 第一轮
+  （§2.2 第 1/2/3/5 项）已完成**，剩余 diff（第 4 项）与 HTTP serve
+  （第 6 项，有真实消费场景再做）；P3 语义扩展并行可做
+- 文档：[README.md](README.md)（快速上手）·
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（模块/数据流/决策记录）·
+  [docs/CUSTOM_GUIDE.md](docs/CUSTOM_GUIDE.md)（二次开发指南）
+
+---
+
+## 1. 项目创建的意图
+
+### 1.1 要解决的问题
+
+孵化案例 Messiah 游戏项目（内部代码库，核心代码约 6000 文件 / 20000+ 含产物）
+的代码调查长期依赖两种手段，各有硬伤：
+
+| 手段 | 硬伤（实测数据） |
+| --- | --- |
+| grep 关键词检索 | 只认字符串不认语义；同名函数/镜像目录（release_data）造成大量噪音；无法回答「改这个函数影响谁」 |
+| codemap CLI（v4.4.0） | 依赖分析是 **import 级**，无调用链能力；全仓 --deps 触发 ast-grep 30 秒超时 |
+| jedi + 类型桩（前期 PoC） | get_references 有 30 文件解析安全阀，2 万文件库上跨文件边全部静默丢失；单函数查询 12~17 秒 |
+
+而游戏框架的动态语义（`@Components` setattr 拷贝、`genv` 运行时注入、
+`Property` 声明、entitylist 反射）使得 **PyCharm 级的调用链分析**在通用工具上
+天然残缺——前期实验证明：无桩 jedi 解析 0 条跨文件边，配桩后 18 条（+18），
+但桩机制又被 `.pyi` 必须与源码同目录的规则锁死，无法与源码分离。
+这类习语并非孤例，凡重动态语义的 Python 项目（Web 框架的服务定位器、
+插件的注册表注入等）都有同构问题，故核心引擎按项目无关设计。
+
+### 1.2 项目定位
+
+**QCodeMap = 桩数据化 + 预建倒排索引 + 两阶段查询 + 传统 codemap 结构能力**，一句话：
+
+> 把「框架语义」从类型桩文件降格为索引库中的数据行，把「找引用」从现扫变成查表，
+> 为大型 Python 代码库提供秒级、可依赖、与源码物理分离的调用链与结构查询工具。
+> 框架习语经 custom/ 钩子插拔，换项目零改核心。
+
+### 1.3 设计原则（从可行性验证中固化）
+
+1. **纯 stdlib**：只用 ast / sqlite3 / re / os / pathlib。不引入 jedi、codemap 二进制依赖
+   （jedi 桩版结论已被本方案取代，但保留其基准测试地位）。
+2. **索引与源码分离**：全部索引产物落在 QCodeMap 目录的 `cache/`，被分析项目
+   目录零写入、版本管理零感知。索引可再生，删除即重建。
+3. **零误报优先于高召回**：解析不了的边宁可降级输出「同名候选（未验证）」，不给假边。
+   可行性验证中 5/5 边全部命中的前提是没有一条错误边。
+4. **两阶段架构**：阶段 1 倒排查表（毫秒）拿候选，阶段 2 纯 ast 语义解析验证。
+   该架构已被验证为万文件级代码库下的正确形态（PyCharm 同构）。
+
+---
+
+## 2. 开发方向
+
+### 2.1 架构总览
+
+```
+┌─ 建索引（一次性 43s / 增量秒级）───────────────────────────┐
+│ scan: 遍历核心目录 .py（复用排除清单）                      │
+│  ├ names    标识符倒排：name → file:line:col   （阶段1）   │
+│  ├ defs/classes/imports   定义与导入图                     │
+│  └ facts    桩数据化四类语义事实：                          │
+│     ├ Property('x', default) 声明 → 类属性类型             │
+│     ├ @Components(...) 注册 → 宿主↔组件 MRO 补边           │
+│     │   （含 *pkg.importall() 星调用：读包 __init__ 清单）  │
+│     ├ genv.X = self / = 构造 → 运行时全局类型              │
+│     └ self.X = 构造 / return 构造 → 属性/返回类型          │
+│ store: SQLite（cache/qcodemap.db，实测 6052 文件 235MB）   │
+└────────────────────────────────────────────────────────────┘
+┌─ 两阶段查询 ───────────────────────────────────────────────┐
+│ 阶段1  SQL 查表拿候选（实测 1~25ms）                        │
+│ 阶段2  候选位置 → ast 定位调用表达式 → 局部变量数据流追踪    │
+│        → 类型查 facts → 沿 bases+组件 MRO 找方法定义        │
+│        → 定义比对，边成立/降级                              │
+└────────────────────────────────────────────────────────────┘
+```
+
+### 2.2 分期计划
+
+**P0 —— 正式工程骨架（先行，~1 天）**
+
+- `qcodemap/` 包：`store.py`（SQLite 封装）、`scanner.py`（单文件 ast 扫描）、
+  `build.py`（目录遍历 + 增量更新 + @Components pass2 跨文件解析）。
+- 已有可行性脚本中的实现可直接提炼（注意修正 §3 已知问题）。
+- CLI：`python -m qcodemap build [--root X] [--targets ...] [--rebuild]`。
+
+**P1 —— 查询能力（核心价值，~3 天）**
+
+- `resolve.py`：两阶段查询解析器（可行性脚本已验证的完整链路产品化）。
+- CLI：
+  - `qcodemap callers <file> <func>` —— 谁调用这个函数（核心场景）。
+  - `qcodemap callees <file> <func>` —— 这个函数调了谁。
+  - `qcodemap usages <symbol>` —— 标识符全仓出现点（带验证标记）。
+- 输出分级：`VERIFIED`（语义验证边）/ `CANDIDATE`（同名未验证）/ 排除镜像目录。
+- `edges` 缓存表：已验证边落库，二次查询直接命中，mtime 失效。
+
+**P2 —— 传统 codemap 能力（平价替代，~2 天）**
+
+- `qcodemap tree [--depth N]`：目录结构+体积统计（排除清单同源）。
+- `qcodemap deps <目录>`：import 级依赖图（ast 提取，无 ast-grep 超时问题）。
+- `qcodemap importers <file>`：谁 import 这个文件、枢纽判定。
+- `qcodemap hubs`：import 入度排行（对标 codemap 的枢纽识别）。
+- 输出风格对齐 codemap 的 JSON schema（`codemap.analysis/v1` 风格），
+  降低 AI 侧消费习惯的迁移成本。
+
+**P3 —— 语义扩展（按需，与 P4 并行可做）**
+
+- pubsub 事件配对表：`ListenTo(ON_X)` ↔ `Broadcast/Pub(ON_X)` 常量 join，
+  补静态不可达的事件分发边（jedi 版同样做不到的天花板）。
+- RPC 桩↔handler 约定映射（客户端 stub 名 ↔ 服务端注册）。
+- 种子事实的采集自动化：`Space.GetEntity` 等返回类型目前靠人工种子，
+  扩展为「docstring 类型标注 + 调用方语境投票」半自动采集。
+- attr-refs 命令（属性版 callers）：cur_titles 实测暴露的缺口——attr 原始
+  出现大头是字典键，按 receiver（self/genv.avatar/owner/...）分类并沿
+  comp 反查宿主 Property 声明，同名声明消歧。
+
+**P4 —— 产品化与 agent 生态对齐（2026-08-18 定；第一轮同日落地，见附录 E）**
+
+对标 codemap（https://github.com/JordanCoin/codemap）只看 Python 维度的
+差距复盘：分析深度已反超（codemap 对 py 仅 ast-grep import 级，无调用链；
+QCodeMap 有语义调用图/框架事实/VERIFIED 分级/函数级影响面），缺口集中在
+产品化与 AI 消费体验。按价值排序：
+
+1. **覆盖率契约硬化**（小）：scanner 记 `parse_ok` 标记，callers/callees
+   结果透出「验证时有 N 个文件 ast 失败」——ast 失败文件目前静默降级为
+   仅 names，结果不告知索引残缺（对齐 codemap complete/partial 契约）。
+   ——**已完成**（附录 E）：files.parse_ok 落库（SCHEMA_VERSION 2），
+   resolve 全库口径 coverage、structure 按 scope 给 partial+issues、
+   callers 坏文件候选专门注明（ARCHITECTURE §5.7）。
+2. **MCP 工具面补齐**（小）：9→12 工具。补 `find_file`（模糊路径搜索）、
+   `get_file_context`（单文件的 defs+importers+deps 打包一次给 AI，省多
+   次往返）、`context`（见 3）。
+   ——**已完成**（附录 E）：三工具 + CLI find / file-context / context
+   子命令（qcodemap/context.py）。
+3. **context 聚合命令**（小）：结构+枢纽+统计的一次性机器可读项目档案
+   （对标 `codemap context --for X --compact`），AI 会话冷启动注入用。
+   ——**已完成**（附录 E）：qcodemap.context/v1——stats+top_dirs+hubs+
+   external_top+coverage，compact 截断；intent/skills 等字段按「明确
+   不追齐」不实现。
+4. **依赖漂移对比**（中）：`diff` 命令——两版本/两快照间 deps/hubs 漂移
+   报告（重构前后枢纽变化、新增耦合），与 blast-radius 的「变更→影响」
+   互补成双向。（P4 第二轮）
+5. **懒刷新**（小，替代 codemap watch 守护）：MCP 查询入口发现目标文件
+   mtime 漂移时自动增量 build（0.5s 级），比后台守护进程更贴合现有架构。
+   ——**已完成**（附录 E）：目标文件型工具（callers/callees/deps/
+   importers/get_file_context/blast）查询前 drift_check（上限 1000 文件），
+   漂移即增量重建，结果附 refresh 摘要（ARCHITECTURE §5.8）。
+6. **HTTP serve**（中，有真实消费场景再做）：127.0.0.1 API，供脚本/网页
+   消费（目前仅 stdio MCP）。
+
+明确不追齐的（场景不符，防 scope 膨胀）：远程仓库浅克隆分析（本库永远在
+本地 svn）、budgets/guidance/routing 项目配置与会话 hooks（宿主 ZCode +
+skills 已覆盖）、handoff/working-set/activity 跨 agent 交接、skyline 可视化。
+
+### 2.3 明确不做（防 scope 膨胀）
+
+- 不做通用 Python 类型系统（闭包、泛型容器、多态推导）——框架模式语义已够用。
+- 不做编辑器集成 / LSP server——查询 CLI + AI 消费是目标形态。
+- 不 fork jedi / codemap——codemap 保持独立 CLI 共存，QCodeMap 是自研补充。
+- 不处理 `.pyi`——桩已数据化，项目内不再生成任何文件。
+
+---
+
+## 3. 已知问题与风险（来自可行性验证）
+
+| # | 问题 | 缓解方向 |
+| --- | --- | --- |
+| 1 | `GetEntity` 等通用方法返回类型依赖「语境种子」（如按 toplogo 语境标 AvatarSceneNode），跨语境会错 | 返回类型种子标注置信度；或按调用方属性访问集做局部形状推断；P1 先维护显式种子文件 `seeds.py` |
+| 2 | 同名类多文件（如 `CombatAvatarMember` 在多玩法模块重复定义）当前取首定义 | defs/classes 查询一律带 file 维度；同名时降级 CANDIDATE 并列出全部定义点 |
+| 3 | pubsub `ListenTo` 事件分发边静态不可达（真值只能运行时拿） | P3 事件常量配对表补约定边，输出标注 `EVENT-INFERRED` |
+| 4 | 2 万全量文件下 names 表 558 万行 / 235MB，但未测含 facts 的完整库体量 | P0 完成后立即跑全量 build 实测，预期 <400MB |
+| 5 | 数据目录排除（data/data_lang）按目录名硬编码，特殊路径可能漏 | 排除清单提为常量 + CLI 参数覆盖；对 `*_origin.py` 单文件级排除 |
+| 6 | 增量更新的正确性（删除/改名文件的级联清理）尚未实现 | store 层按 file_id 级联删除（DDL 已预留） |
+
+---
+
+## 4. 最终应实现的功能（验收标准）
+
+### 4.1 功能验收
+
+1. **建索引**：`qcodemap build` 对核心七目录（gclient/gserver/gshare/HelenFramework/
+   SunshineSDK/Montage/UGC）全量建库 ≤90 秒（实测 43s）；增量更新（单文件改动）
+   ≤5 秒；缓存固定在 QCodeMap 目录的 `cache/`，被分析项目目录零写入。
+2. **调用链查询**：`qcodemap callers <file> <func>`——
+   - 可行性基准五条边（RefreshAiTakeoverToplogo ×2、RemoveDummyEntity ×2、
+     GetTeammateInfo ×1）全部命中且零假边；
+   - 单函数查询（含语义验证）≤5 秒，edges 缓存命中时 ≤0.5 秒；
+   - 每条边带 `VERIFIED/CANDIDATE` 分级与调用方函数名（经 ast 映射外层函数）。
+3. **结构查询**：`tree/deps/importers/hubs` 四命令输出与 codemap 对应能力一致
+   （抽样对比 import 入度 Top25 名单相符），且无 30 秒超时限制。
+4. **可维护性**：种子事实集中在 `seeds.py` 可注释可覆盖；索引可 `--rebuild` 重建；
+   排除清单单点定义。
+
+### 4.2 质量验收
+
+- 回归测试：`test_feasibility.py`（语义链路 5/5）与 `test_scale.py`（规模基准）
+  纳入 `tests/`，每次改动后跑通。
+- 零依赖：`import qcodemap` 全链路不出现第三方库。
+- 零污染：`svn st` 在被分析项目中无任何新增/修改。
+
+### 4.3 最终形态示例
+
+```
+$ python -m qcodemap callers gclient/gameplay/logic_base/entities/combatavatarmembers/cimp_combat_unit.py GetTeammateInfo
+[VERIFIED] AvatarSceneNode.RefreshAiTakeoverToplogo
+           gclient/gameplay/logic_base/comps/avatar_scene_node.py:366
+[CANDIDATE] replay_util.GetTeammateInfo（同名不同函数，已排除语义验证）
+           gclient/gameplay/logic_base/comps/comp_mark.py:306
+...（17 处验证边 + 分级列表，总耗时 3.2s，缓存命中 0.2s）
+```
+
+---
+
+## 附录 A：可行性验证数据（2026-08-17）
+
+| 指标 | 数值 | 脚本 |
+| --- | --- | --- |
+| 语义链路命中 | 5/5 标准答案边，零假边 | test_feasibility.py（10 文件小样） |
+| 全量建索引 | 6052 文件 / 558 万 names / 43s / 235MB | test_scale.py |
+| 阶段1查询 | 1ms（普通名）~ 25ms（万级高频名） | test_scale.py |
+| 对照：jedi+桩版 | 单函数 12~17s，安全阀丢边 | jedi_goto_edges.py（外部） |
+| 对照：codemap --deps | import 级 only，全仓 30s 超时 | codemap v4.4.0（外部） |
+
+## 附录 B：关键设计决策记录
+
+- 桩数据化取代 .pyi：`.pyi` 必须与源码同目录（Python 模块解析规则），无法与源码
+  分离；数据化后进 SQLite，同目录约束消失。（实验：镜像目录桩 0 生效）
+- 纯 stdlib 取代 jedi：get_references 的 `_PARSED_FILE_LIMIT=30` 安全阀在大库上
+  静默丢边（抬高至 2000 仍无效），且进程内冷扫描单次 198s。
+- @Components 星调用解析法：`*pkg.importall()` → 读包 `__init__.py` 的
+  `from . import X` 清单 → 在 X 模块找 `{Host}Member` 类。（实测打通
+  CombatAvatar → CombatAvatarMember → GetTeammateInfo 链）
+- 局部变量二级推导：`avatar = space.GetEntity(x)` 中 space 本身是
+  `self.space` 属性时，先解属性类型再查返回事实。（实测打通 avatar 链）
+
+## 附录 C：P0+P1 实测数据（2026-08-17）
+
+| 指标 | 验收线 | 实测 | 结论 |
+| --- | --- | --- | --- |
+| 全量建库 | ≤90s | 6052 文件 78.1s（含完整 ast+facts，旧基线 43s 仅倒排） | 过 |
+| 库体量 | <400MB | 333MB（含 facts + 索引） | 过（§3-4 关闭） |
+| 单文件增量 | ≤5s | 0.5s（mtime 命中即跳过） | 过 |
+| 语义查询（含验证） | ≤5s | 0.66s（41 候选全验证） | 过 |
+| edges 缓存命中 | ≤0.5s | 0.001s | 过 |
+| 语义链路回归 | 5/5 边 | 5/5 零假边（tests/test_feasibility.py） | 过 |
+| 零依赖 | stdlib only | ast/sqlite3/re/importlib/json/argparse/fnmatch/warnings | 过 |
+| 项目零写入 | svn st 无新增 | replay_util.py 仅 touch mtime，svn 无感知 | 过 |
+
+落地中的关键增强（超出可行性版）：
+- **同名类并集语义**：gclient/gserver 镜像类（CombatAvatar）与多文件同名组件
+  （CombatAvatarMember ×2）在方法查找时按「同文件>同目录>同顶层 target」排序
+  查全部定义（§3-2 的正式解法，消歧失败不再直接断链）；
+- **import 解析重写**：`from M import N` 的 N 为子模块时落 `M/N.py`（可行性版
+  拼成 `M.py`，组件边全丢）；模块映射基于全部文件而非仅有类的文件；
+- **模块级调用解析**：`mod.Func()` 调用形态走 import 归一（GetPlayer 等）；
+- **edges 缓存带 resolver_version**：解析器行为变更（RESOLVER_VERSION +1）即
+  整体失效，避免旧结论污染；
+- **Property 第二参数捕获**：`Property("ai_memory", CAIMemory)` 直接登记真实
+  类型，减少对人工种子的依赖。
+
+## 附录 D：第二轮实测数据（2026-08-17）
+
+| 能力 | 实测 | 备注 |
+| --- | --- | --- |
+| deps/importers/hubs/tree | 四命令全库各 ≤0.15s | 纯 SQL 查表，无 ast-grep 30s 超时坑；hubs Top10 锚点与 codemap 实测方向一致（consts/events/cconst 领跑） |
+| importers 枢纽判定 | P95 入度阈值 | avatar_scene_node.py 18 引用判枢纽 |
+| MCP server | 9 工具，进程内+子进程冒烟通过 | stdio JSON-RPC，纯 stdlib；注册于项目 .codex/mcp.json（stdio 型，cwd=本目录） |
+| blast-radius | 冷/热均 0.4s（121 函数×2 文件，闭包深度 1） | 调用链闭包（codemap 无此能力）+ import 级双维度 |
+
+第二轮落地的关键修复：
+- **查询热路径三轮优化**（叠加效果：单高频函数 214s → 亚秒）：
+  1. 文件级预索引（行→调用节点/外层函数/赋值），替代逐候选全树 ast.walk；
+  2. mro/类定义/方法定义查询的 Resolver 级 dict 缓存（283 万次 execute → 千次级；
+     缓存键含 from_file 消歧维度）；
+  3. blast 闭包对超高频名（>1500 候选，如 __init__/add_timer）只吃 edges 缓存，
+     不做冷验证（此类名字的 VERIFIED 边极少且 CANDIDATE 洪流无信息量）。
+- **局部变量二级推导递归防线**（depth>6 返回 None）：`x = x.f()` 自引用形态
+  曾致无限递归；RESOLVER_VERSION 随行为变化升级（当前 v4），旧 edges 缓存整体失效；
+- **diff hunk 解析**：new 侧行区间直接由 @@ 头解析，变更函数定位为启发式
+  enclosing（def 到下一 def 前），输出带 heuristic 标注；
+- **test_scale 基线容差**：文件数 ±1%（目标库自然演进），names ±10% 监控线。
+
+## 附录 E：P4 第一轮实测数据（2026-08-18）
+
+| 能力 | 实测 | 备注 |
+| --- | --- | --- |
+| 覆盖率契约 | 全库 ast 失败 1 文件被捕获并透出 | 此前静默残缺；callers/结构命令均带 partial+计数，deps 附 issues 清单 |
+| find | 0.004s（avatar_scene_node 唯一命中） | LIKE 转义后真子串语义，短路径优先 |
+| file-context | 0.155s（92 defs/19 imports/18 importers/枢纽=True） | 单文件消费面一次打包 |
+| context | 0.344s（stats+top_dirs+hubs+external_top） | hubs Top3 consts/events/cconst 与附录 D 锚点一致；compact 截断生效 |
+| 懒刷新 | touch 1 文件 → drift_check 命中 → 0.8s 增量重建 → refresh 摘要回传 | 二次调用无 refresh（索引已同步）；MCP 全链路验证 |
+| MCP | 12 工具，进程内+子进程冒烟通过 | 新增 find_file / get_file_context / context |
+| 语义回归 | 5/5 边零假边；GetTeammateInfo VERIFIED=21 与基线一致 | 六件回归全过（含新增 test_p4） |
+| SCHEMA_VERSION 1→2 | rebuild 自动 DROP 旧表按新 schema 重建 | rebuild 前置 `_prepare_rebuild` 绕开版本校验死锁（首跑踩坑：只清 meta 时旧表结构残留导致 INSERT 失败） |
+
+本轮全量重建 488s（基线 207s；names/组件边/文件数与基线一致，判断为机器
+当日负载，非代码回归——增量路径 0.5s 不变）。
+
+P4 第一轮落地中的关键实现点：
+- **rebuild 语义修正**：`_prepare_rebuild` 在 Store 打开前独立连接 DROP
+  全部表。原版 `--rebuild` 会先撞上 schema 版本校验（版本不符拒绝打开），
+  形成死锁；且只清 meta 不 DROP 时 `CREATE TABLE IF NOT EXISTS` 跳过建表，
+  新列缺失导致 INSERT 失败——schema 变更必须物理重建表结构。
+- **find_file 的 LIKE 转义**：文件名常见 `_` 是 LIKE 通配符，不转义会
+  伪命中（test_p4 用 demo_g00d 反例锚定）。
+- **blast 的 svn st 模式与懒刷新合并**：MCP 入口先采集变更清单做 drift_check，
+  再显式传入 blast，省一次 svn st 子进程调用；rev 模式对历史版本不刷新。
+- **importers 的 coverage scope 语义**：scope=被引用目标集而非引用方全集
+  （与 deps 的「查询目标集」口径一致），目标文件正常即 complete。
