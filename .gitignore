@@ -4,9 +4,24 @@ cache/
 # Python
 __pycache__/
 *.pyc
+*.pyo
 
 # 项目档案不入库：custom/ 只随附 README.md 模板，
 # 各项目的 config/facts/seeds 留在本地（含孵化案例的三件）
 custom/config.py
 custom/facts.py
 custom/seeds.py
+
+# 含内部项目信息（Messiah 框架习语 / 内部路径），脱敏后再公开
+REQUIREMENTS.md
+tests/test_callback.py
+tests/test_local_imports.py
+tests/test_pubsub.py
+tests/test_rpc.py
+tests/original/
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
