@@ -4,12 +4,12 @@
 > 核心项目无关）。孵化案例为 Messiah 游戏项目（内部代码库），本文实测数据
 > 与路径示例均出自该案例。
 
-- 版本：v0.8（P3-2 落地：RPC 双端跳转 rpc-refs + blast 穿透；开源化 v0.7 功能同 v0.6）
+- 版本：v0.9（P3-1 落地：pubsub 事件配对 pubsub-refs + blast 穿透）
 - 日期：2026-08-18
 - 状态：**P0~P2 已完成**（实测见附录 C/D）；**P4 第一轮（§2.2 第 1/2/3/5 项）
   已完成**（附录 E），剩余 diff（第 4 项）与 HTTP serve（第 6 项，有真实
-  消费场景再做）；**P3-2 RPC 双端跳转已完成**（附录 F），P3 其余三项
-  （事件配对表/种子自动化/attr-refs）按需并行
+  消费场景再做）；**P3-2 RPC 双端跳转已完成**（附录 F）；**P3-1 pubsub
+  事件配对已完成**（附录 G），P3 其余两项（种子自动化/attr-refs）按需并行
 - 文档：[README.md](README.md)（快速上手）·
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（模块/数据流/决策记录）·
   [docs/CUSTOM_GUIDE.md](docs/CUSTOM_GUIDE.md)（二次开发指南）
@@ -114,6 +114,11 @@
 
 - pubsub 事件配对表：`ListenTo(ON_X)` ↔ `Broadcast/Pub(ON_X)` 常量 join，
   补静态不可达的事件分发边（jedi 版同样做不到的天花板）。
+  ——**已完成**（2026-08-18，P3-1，见附录 G）：pubsub 事实表 + 第六钩子
+  `pubsub_facts`（订阅/发布分发表在 custom/facts.py）+ `pubsub-refs` 命令/
+  MCP 工具（EVENT-INFERRED/LISTENER 分级）+ blast-radius 双向事件穿透。
+  join 键是经 import 归一的「模块路径.常量名」而非常量值（客户端常量是
+  range 解包整数序号、服务端 enum 小整数，两端撞号且无数值语义）。
 - RPC 桩↔handler 约定映射（客户端 stub 名 ↔ 服务端注册）。
   ——**已完成**（2026-08-18，P3-2，见附录 F）：rpc 事实表 + 第五钩子
   `rpc_facts`（分发表在 custom/facts.py，7 通道族）+ `rpc-refs` 命令/
@@ -179,7 +184,7 @@ skills 已覆盖）、handoff/working-set/activity 跨 agent 交接、skyline �
 | --- | --- | --- |
 | 1 | `GetEntity` 等通用方法返回类型依赖「语境种子」（如按 toplogo 语境标 AvatarSceneNode），跨语境会错 | 返回类型种子标注置信度；或按调用方属性访问集做局部形状推断；P1 先维护显式种子文件 `seeds.py` |
 | 2 | 同名类多文件（如 `CombatAvatarMember` 在多玩法模块重复定义）当前取首定义 | defs/classes 查询一律带 file 维度；同名时降级 CANDIDATE 并列出全部定义点 |
-| 3 | pubsub `ListenTo` 事件分发边静态不可达（真值只能运行时拿） | P3 事件常量配对表补约定边，输出标注 `EVENT-INFERRED` |
+| 3 | pubsub `ListenTo` 事件分发边静态不可达（真值只能运行时拿） | 已由 P3-1 配对表补约定边（附录 G），输出标注 `EVENT-INFERRED` |
 | 4 | 2 万全量文件下 names 表 558 万行 / 235MB，但未测含 facts 的完整库体量 | P0 完成后立即跑全量 build 实测，预期 <400MB |
 | 5 | 数据目录排除（data/data_lang）按目录名硬编码，特殊路径可能漏 | 排除清单提为常量 + CLI 参数覆盖；对 `*_origin.py` 单文件级排除 |
 | 6 | 增量更新的正确性（删除/改名文件的级联清理）尚未实现 | store 层按 file_id 级联删除（DDL 已预留） |
@@ -360,3 +365,64 @@ blast 穿透实测：`blast-radius --files gserver/entities/clan_stub.py --depth
   配对一律走 defs 表按方法名（stub 已知时精确）；
 - **ast 失败文件的 RPC 调用自动缺席**（如 cimp_replay.py 的 4 处
   CallServerNew），note 提示走 usages 补查。
+
+## 附录 G：P3-1 pubsub 事件配对实测（2026-08-18）
+
+机制摸底（两轮探索结论）：客户端与服务端是两套干净分端的事件机制——
+客户端 `@events.ListenTo(events.X)`（约 4276 处）注册进 genv.messenger
+（即 gshare/pubsub 单例），发布主入口 `genv.messenger.Broadcast(events.X)`
+（约 3473 处，`self.Publish` 客户端仅 1 处且为注释死代码）；服务端
+`@Subscribe(sconst.X)`（41 处）注册进 `_FUNCTION_DICT`，发布
+`self.Publish(Cls.X)` 等（132+ 处）。**join 键 = 经 import 归一的
+「模块路径.常量名」**：常量值是 range(1,1246) 解包整数（客户端 1245 个
+常量全部 tuple-unpack 赋值）与服务端 enum 小整数，两端撞号且无数值语义，
+裸属性名跨端也会撞（DIE 等两端语义无关）。
+
+通道捕获量级（pubsub 表，全量重建 348s，SCHEMA 4）：
+
+| 侧 | pubsub 行数 | 对照探索预估 | 说明 |
+| --- | --- | --- | --- |
+| listen（订阅） | 4769 | ~4276+41 | 客户端 4199（grep 4276 含注释行，ast 侧天然不计）+ 服务端 559 + 其余 11 |
+| publish（发布） | 3628 | ~3473+132 | Broadcast（receiver 末段限 messenger）+ 服务端 Publish 族 |
+
+探索预估的量级偏差已归因：服务端 @Subscribe 预估 41 只数了 sconst./consts.
+前缀形态，漏掉 500 处 `@pubsub.Subscribe(裸类名)`；客户端差值 77 为注释掉
+的装饰器（grep 计、ast 不计）。全表 8397 行，unresolved（`?` 前缀）仅 26 行，
+distinct 事件键 1363 个，其中 1212 个双端配对成功（有发布有订阅）。
+
+案例验证（主库实测全命中）：
+1. `pubsub-refs ON_MONEY_DMZ_COIN_CHANGE`：发布点 1（cimp_dmz_mall.py:53
+   PlayerAvatarMember._on_set_dmz_coin）↔ 订阅 2（dmz_shop_window.py:657
+   DmzShopWindow.OnDmzCoinChange + dmz_warehouse_window.py:1472），客户端链；
+2. `pubsub-refs TEAM_SETTLE`：单键 gserver.sconst.CombatAvatarEvent.TEAM_SETTLE
+   订阅 43 + 发布 2——裸类名（from gshare.consts import）/sconst 前缀两种
+   import 写法经别名归一 join 成同键；
+3. blast 双向穿透：改 dmz_shop_window.py → 发布方 cimp_dmz_mall 入影响面
+   （via_pubsub）；改 game_logic_sniper_mode.py → CHANGE_HERO 事件一次带出
+   43 个订阅 handler（换英雄影响面全貌）。RPC via_rpc 穿透回归无损。
+
+落地关键点与坑：
+- **装饰器 Call 的 func 是 Name 不是 Attribute**：`@ListenTo(events.X)`
+  的 receiver 形态与 `self.Publish(X)` 不同，订阅侧须同时认裸名与模块
+  前缀两种 receiver；发布侧反之必须带 receiver（裸名 `Publish(x.Y)`
+  无法与本地同名函数区分，跳过防误报）；
+- **事件归一只要求自洽不要求绝对路径**：同端两侧 import 风格一致即
+  推出相同键；根名解析失败（局部变量转发等）落 `?`+原文，两侧同用
+  同文仍可 join，pubsub-refs 标注 unresolved 降级；
+- **嵌套 def 双访问去重**：装饰器/调用会被外层函数 walk 与内层自身
+  扫描各产一行，按 (file,line,side,event) 去重保留内层归属（后到覆盖）；
+- **排除项**：`.FireEvent(` 518 处是动画骨架事件（字符串 cue 名，无
+  Python 监听方）；gserver/entities/pubsub_stub.py 的
+  Publish(proxy, topic, data) 是跨进程网络 topic pubsub；@AIListenTo
+  是 AI 传感器机制——三者与本机制无关，均在分发表/排除文件层拦下；
+- **转发别名归一**：gshare/consts.py:12 在服务端语境 `from gserver.sconst
+  import AvatarEvent, CombatAvatarEvent` re-export，1686 个文件两种 import
+  写法并存——不归一则同事件裂成两个键、配对率骤降（TEAM_SETTLE 曾裂成
+  25+18 两键）。custom 层 PUBSUB_ALIAS_PREFIX 前缀改写解决。
+
+已知边界：
+- 变量首参（全库约 3 处 `Broadcast(self.cur_event)`）不做属性回溯，
+  静默跳过；
+- 模块级语句里的 pubsub 调用不采集（与 rpc 口径一致）；
+- 客户端 `self.Publish`/`self.Broadcast` 之外的理论形态（模块级
+  pubsub.Publish 3 处转发）不单列，UnBoundPublishFunc 已入分发表。

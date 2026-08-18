@@ -4,7 +4,8 @@
 约定：
 - 所有方法允许缺省实现（返回 None / []），core 回退到通用规则；
 - 事实行 = (表名, 行元组)，表名限定 attr / global_assign / comp_raw，
-  行结构必须与 store 对应表的列一致（见 store.DDL）；
+  行结构必须与 store 对应表的列一致（见 store.DDL）；rpc/pubsub 钩子
+  返回裸元组，rel/line 等定位列由 scanner 补齐；
 - 伪类型名中含 '.' 且前段是已知全局对象名时，视为运行时全局引用
   （如 'genv.space'），由 resolver 查 global_assign(base, attr) 还原类型，
   core 不硬编码任何具体全局名——哪些名字算全局对象由提取器自己决定。
@@ -14,14 +15,21 @@ import ast
 
 
 class FactContext(object):
-    """提取上下文：当前文件相对路径（posix）、模块名、所在类名（模块级为 None）。"""
+    """提取上下文：相对路径（posix）、模块名、所在类名（模块级为 None）。
 
-    __slots__ = ('rel', 'mod', 'cls')
+    func/imports 仅函数级钩子（rpc_facts/pubsub_facts）有值：func=所在函数名，
+    imports=本文件模块级 import 预扫映射 {本地名: 目标点分路径}，供框架侧
+    把 events.X 这类引用归一成可 join 的完整常量键。
+    """
 
-    def __init__(self, rel, mod, cls):
+    __slots__ = ('rel', 'mod', 'cls', 'func', 'imports')
+
+    def __init__(self, rel, mod, cls, func=None, imports=None):
         self.rel = rel
         self.mod = mod
         self.cls = cls
+        self.func = func
+        self.imports = imports
 
 
 class FactsHooks(object):
@@ -62,5 +70,16 @@ class FactsHooks(object):
         用于字符串分发的 RPC/远端调用习语：chan=通道名（如 C2S/S2C/STUB，
         对 core 不透明），method=远端方法名字符串，stub=目标实体类名或 None。
         core 对每个函数体内的 Call 节点各调用一次；返回 [] 走通用规则。
+        """
+        return []
+
+    def pubsub_facts(self, call, ctx):
+        """函数体内任意 Call 节点 -> [(side, event), ...]。
+
+        用于事件分发习语：side=方向名（listen/publish 约定，对 core 不
+        透明），event=事件常量键。常量键建议用 ctx.imports 把 events.X
+        归一成「模块路径.常量名」（如 gclient...events.ON_X），保证订阅
+        与发布两侧不同 import 写法可 join。装饰器 Call（@ListenTo(X)）
+        同样经本钩子访问；返回 [] 走通用规则。
         """
         return []

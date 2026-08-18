@@ -60,7 +60,7 @@ seeds：custom 键覆盖内置同键种子（dict 合并语义）
 custom 文件按路径 importlib 动态加载（`qcodemap_custom_config` 等模块名），
 缺失哪个文件就用哪个默认——所以三个文件全部可选。
 
-## 3. 扩展框架语义：FactsHooks 五个钩子
+## 3. 扩展框架语义：FactsHooks 六个钩子
 
 先在目标代码里确认习语的真实形态（`grep -n` 看实际写法），再实现：
 
@@ -91,6 +91,11 @@ class MyFacts(FactsHooks):
         字符串分发 RPC/远端调用提取：按分发表匹配 attr 与参数位，返回
         (通道名, 方法名字符串, 目标类名或 None)。详见孵化案例的
         RPC_DISPATCHERS 写法与 §3.1。"""
+
+    def pubsub_facts(self, call, ctx):
+        """函数体内任意 Call 节点 -> [(side, event), ...]。
+        事件分发提取（订阅装饰器/发布调用），event 建议用 ctx.imports
+        归一成「模块路径.常量名」保证两侧可 join。详见 §3.2。"""
 ```
 
 事实行必须与 store 表列一致：
@@ -100,6 +105,8 @@ class MyFacts(FactsHooks):
   （ref=同文件/裸名；attr=mod.Cls 前缀；importall=*pkg.importall() 星调用）
 - `rpc`：`(rel, line, chan, method, stub)`（stub 可 None；由 rpc_facts
   钩子产出，scanner 负责补 rel/line）
+- `pubsub`：`(rel, line, side, event, func, cls)`（由 pubsub_facts 钩子
+  产出 (side, event)，scanner 补定位列与所在函数/类）
 
 ### 3.1 字符串分发 RPC 的分发表写法
 
@@ -139,6 +146,65 @@ class MyFacts(FactsHooks):
 单行即降级。参数位以目标项目分发器的**真实签名**为准（grep 定义处核实，
 勿凭调用样例推断——同一族可能带不同前缀参数）。
 
+### 3.2 事件分发 pubsub 的分发表写法
+
+目标项目的事件机制若是「订阅装饰器 + 发布方法」形态（`@ListenTo(EV_X)` ↔
+`messenger.Broadcast(EV_X)`），用 `pubsub_facts` 钩子覆盖。要点：**join 键
+用 import 归一后的常量全路径**（`ctx.imports` 是 scanner 预扫的本文件
+import 映射 {本地名: 目标点分路径}），不要用常量值——常量值常是整数
+序号且两端撞号；订阅装饰器的 receiver 有裸名/模块前缀两形态都要认，
+发布必须带 receiver 防与本地同名函数混淆：
+
+```python
+SUBSCRIBERS = {'ListenTo': 0, 'Subscribe': 0}   # attr -> 事件参数位
+PUBLISHERS = {'Publish': 0, 'Broadcast': 0}
+BROADCAST_RECEIVER_ENDS = ('messenger',)        # Broadcast 限 receiver
+
+class MyFacts(FactsHooks):
+    def pubsub_facts(self, call, ctx):
+        func = call.func
+        if isinstance(func, ast.Attribute):
+            attr, receiver = func.attr, func.value
+        elif isinstance(func, ast.Name):
+            attr, receiver = func.id, None
+        else:
+            return []
+        if attr in SUBSCRIBERS:            # 订阅：receiver 两形态都认
+            out = []
+            for arg in call.args:
+                ev = self._event_key(arg, ctx)
+                if ev:
+                    out.append(('listen', ev))
+            return out
+        if attr in PUBLISHERS and receiver is not None:
+            end = receiver.attr if isinstance(receiver, ast.Attribute)                 else getattr(receiver, 'id', None)
+            if attr == 'Broadcast' and end not in BROADCAST_RECEIVER_ENDS:
+                return []
+            ev = self._event_key(call.args[0], ctx) if call.args else None
+            return [('publish', ev)] if ev else []
+        return []
+
+    @staticmethod
+    def _event_key(arg, ctx):
+        # events.ON_X -> '模块路径.ON_X'；根名未解析 -> '?'+原文（原文 join）
+        ref = dotted(arg)
+        if not ref or '.' not in ref:
+            return None
+        root, rest = ref.split('.', 1)
+        target = (ctx.imports or {}).get(root)
+        return '%s.%s' % (target, rest) if target else '?' + ref
+```
+
+配对查询用 `qcodemap pubsub-refs <事件名>`（裸名后缀匹配分组，完整键
+全等）；与机制无关的同名方法（如网络 topic pubsub）在 EXCLUDE_FILES
+按文件排除。
+
+**转发别名要归一**：若常量类存在 re-export（如 B 模块 `from A import Cls`
+后大家混用 A/B 两种前缀 import），同一事件会裂成两个键、配对率骤降——
+维护一张 `{别名前缀: 真实前缀}` 映射在 _event_key 里改写（孵化案例
+gshare.consts→gserver.sconst，1686 个文件混用，实测不归一则同事件
+订阅裂成两半）。
+
 ### 参考：孵化案例的四类习语（真实 custom/facts.py 的抽象）
 
 | 习语 | 事实 | 换框架时的对应物 |
@@ -148,6 +214,7 @@ class MyFacts(FactsHooks):
 | `@Components(A, mod.B, *pkg.importall())` | comp_raw 三形态 | 任意组合/注入装饰器 |
 | `{Host}Member` 命名约定 | importall_members 钩子 | 你的组件命名规则 |
 | `CallServer('X')` 等 7 族字符串分发 | rpc（RPC_DISPATCHERS 分发表） | 任意字符串分发 RPC/消息总线 |
+| `@ListenTo`/`@Subscribe` ↔ `Broadcast`/`Publish` 事件分发 | pubsub（订阅/发布分发表 + import 归一事件键） | 任意事件总线/信号槽 |
 
 ## 4. 扩展查询能力
 

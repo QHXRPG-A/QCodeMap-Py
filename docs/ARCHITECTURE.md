@@ -37,8 +37,9 @@
 | `structure.py` | deps/importers/hubs/tree 结构四命令 | 纯 SQL + 内存 modmap，无 ast-grep；coverage 按 scope 内 parse_ok 给 partial |
 | `blast.py` | 变更影响面：变更集采集（svn st/--rev/--files）+ 调用链闭包 | 闭包复用 Resolver；超高频名只吃缓存；RPC 边穿透（via_rpc 标注） |
 | `rpc_refs.py` | RPC 双端配对查询：rpc 表调用点 + defs 表 handler | RPC-INFERRED/HANDLER 分级；stub 精确配对优先，方法名兜底 |
+| `pubsub_refs.py` | 事件双端配对查询：pubsub 表两侧事实 | EVENT-INFERRED/LISTENER 分级；裸事件名按后缀匹配分组（防跨端撞名） |
 | `context.py` | agent 消费面三命令：find_file / get_file_context / context | 全查表无 ast 现扫；context 为一次性项目档案（qcodemap.context/v1） |
-| `mcp_server.py` | stdio JSON-RPC MCP server（13 工具） | 日志一律 stderr——stdout 是协议流，print 即损坏；目标文件型工具带懒刷新 |
+| `mcp_server.py` | stdio JSON-RPC MCP server（14 工具） | 日志一律 stderr——stdout 是协议流，print 即损坏；目标文件型工具带懒刷新 |
 | `custom/` | 项目定制层（config/facts/seeds 三件，仓库仅随附模板说明） | 见 CUSTOM_GUIDE |
 
 ## 3. 表结构（store.DDL）
@@ -54,6 +55,7 @@
 | `ret` | 返回类型事实：return 构造()（module/class.method 两个命名空间） | 数千 |
 | `comp_raw` / `comp` | @Components 原始行 / 解析后的 host↔comp 边 | 3831/3658 |
 | `rpc` | 字符串分发 RPC 调用点：(file, line, chan, method, stub)，stub 可 NULL | 数千（见附录 F） |
+| `pubsub` | 事件分发两侧事实：(file, line, side, event, func, cls)，event 是 import 归一的常量键 | 数千（见附录 G） |
 | `edges` | 查询结果缓存（name+def+kind 主键，payload 含 mtimes 与版本） | 按查询增长 |
 | `meta` | schema 版本 / 构建统计 | - |
 
@@ -139,11 +141,29 @@ blast 闭包对每个变更函数补查 rpc 表，远端调用点作为入边进
 self.stubname（rpc 行 stub=NULL，按方法名配对）；全库 1 处变量方法名
 调用跳过；响应回调链（caller/callback 变量形态）不做完整分析。
 
+### 5.10 pubsub 事件配对（P3-1：事件分发的约定边）
+事件机制与 RPC 同病：订阅靠装饰器（客户端 `@ListenTo(events.X)`、服务端
+`@Subscribe(sconst.X)`）、发布靠 `genv.messenger.Broadcast(events.X)` /
+`self.Publish(Cls.X)`，注册表在运行时，静态链路断在两侧。解法同 §5.9：
+custom 分发表（PUBSUB_SUBSCRIBERS/PUBSUB_PUBLISHERS，Broadcast 限
+receiver 末段 messenger 防误报）+ 第六钩子 `pubsub_facts` 落 pubsub 表。
+**join 键是经 import 归一的「模块路径.常量名」而非常量值**——孵化案例
+客户端常量是 range(1,1246) 解包整数、服务端 enum 小整数，两端撞号且
+无数值语义；scanner 侧新增 import 预扫（FactContext.imports）供钩子把
+`events.X` 根名解析成模块路径。归一只要求自洽（同端两侧 import 风格
+一致即同键），根名解析失败落 `?`+原文按原文 join（unresolved 降级）。
+订阅装饰器 Call 的 receiver 有裸名/模块前缀两形态都认；发布必须带
+receiver（裸名 Publish(x.Y) 防误报）。嵌套 def 双访问按
+(file,line,side,event) 去重保留内层归属。查询侧 `pubsub_refs` 裸事件名
+按后缀匹配分组（客户端与服务端同名常量分开，防跨端撞名误配）；blast
+闭包双向穿透（改订阅 handler → 发布点入影响面，反之亦然，via_pubsub
+标注）。已知边界：变量首参（全库约 3 处）不做属性回溯；模块级语句里的
+pubsub 调用不采集（与 rpc 口径一致）。
+
 ## 6. 已知边界（接手者从这里继续）
 
 - `Space.GetEntity` 等通用方法返回类型是语境近似（seeds 人工标注），
   跨语境会错——REQUIREMENTS §3-1 的「调用方语境投票」是规划解法
-- pubsub `ListenTo(ON_X)` 事件分发边静态不可达，P3 规划事件常量配对表
 - attr 版引用查询（哪个 self.X 访问流经哪个 Property 声明）尚未成命令，
   comp 表只有 host→comp 方向，组件反查宿主声明需走 genv/种子链人工推
 - MCP server 的 qcodemap_build 全量 rebuild 在 server 进程内执行会阻塞
@@ -163,8 +183,9 @@ self.stubname（rpc 行 stub=NULL，按方法名配对）；全库 1 处变量�
 | `test_scale.py` | 全库规模/查询/缓存指标，文件数 ±1% 容差 | 增量秒级（--rebuild 全量） |
 | `test_structure.py` | 四命令输出正确性 + hubs 锚点方向 | ~1s |
 | `test_blast.py` | 闭包命中已知边（--files 模式，不依赖 svn） | 秒级（缓存热后） |
-| `test_mcp.py` | 进程内协议全流程（13 工具）+ 真子进程冒烟 | ~10s |
+| `test_mcp.py` | 进程内协议全流程（14 工具）+ 真子进程冒烟 | ~10s |
 | `test_p4.py` | 覆盖率契约 + 三新命令 + 懒刷新（临时小库自建） | ~2s |
 | `test_rpc.py` | RPC 分发提取 + rpc-refs 配对 + blast 穿透（临时小库） | ~2s |
+| `test_pubsub.py` | pubsub 双端提取 + 事件归一 join + blast 穿透（临时小库） | ~2s |
 
-动任何 qcodemap/ 代码后七个全跑；只动 custom/ 跑 feasibility + scale 即可。
+动任何 qcodemap/ 代码后八个全跑；只动 custom/ 跑 feasibility + scale 即可。

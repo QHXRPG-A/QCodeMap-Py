@@ -63,7 +63,7 @@ def scan_file(rel, path, hooks=None, downsample=False):
     text = read_source(path)
     r = {'names': [], 'defs': [], 'classes': [], 'imports': [],
          'attr': [], 'global_assign': [], 'ret': [], 'comp_raw': [],
-         'rpc': [], 'parse_ok': True}
+         'rpc': [], 'pubsub': [], 'parse_ok': True}
     seen_names = set() if downsample else None
     for i, line in enumerate(text.splitlines(), 1):
         # 剔除 bytes 字面量后再 token 化（bindict 表格产物的伪 token 源）
@@ -84,14 +84,19 @@ def scan_file(rel, path, hooks=None, downsample=False):
         r['parse_ok'] = False
         return r
     mod = module_of(rel)
+    # import 先于其余语句预扫：imp_map 供函数级钩子把 events.X 这类引用
+    # 归一成完整常量键（见 hooks.FactContext.imports）
+    imp_map = {}
+    for stmt in _module_stmts(tree):
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            _scan_import(stmt, r, rel, mod, imp_map)
     for stmt in _module_stmts(tree):
         if isinstance(stmt, ast.ClassDef):
-            _scan_class(stmt, r, rel, mod, hooks)
-        elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
-            _scan_import(stmt, r, rel, mod)
+            _scan_class(stmt, r, rel, mod, hooks, imp_map)
         elif isinstance(stmt, FUNC_NODES):
             r['defs'].append((rel, stmt.lineno, None, stmt.name))
-            _scan_function(stmt, r, rel, mod, None, hooks)
+            _scan_function(stmt, r, rel, mod, None, hooks, imp_map)
+    _dedup_pubsub(r)
     return r
 
 
@@ -112,10 +117,16 @@ def _module_stmts(tree):
             stack = st.body + stack
 
 
-def _scan_import(stmt, r, rel, mod):
+def _scan_import(stmt, r, rel, mod, imp_map):
     if isinstance(stmt, ast.Import):
         for a in stmt.names:
             r['imports'].append((rel, a.name, None, a.asname))
+            if a.asname:
+                imp_map[a.asname] = a.name
+            else:
+                # import a.b 只绑定根名 a（点分引用以根名为准解析）
+                root = a.name.split('.', 1)[0]
+                imp_map[root] = root
         return
     base = stmt.module or ''
     if stmt.level:
@@ -131,9 +142,10 @@ def _scan_import(stmt, r, rel, mod):
     for a in stmt.names:
         if a.name != '*':
             r['imports'].append((rel, base, a.name, a.asname))
+            imp_map[a.asname or a.name] = '%s.%s' % (base, a.name)
 
 
-def _scan_class(cd, r, rel, mod, hooks):
+def _scan_class(cd, r, rel, mod, hooks, imp_map):
     """单个类：classes 行、钩子类级事实、子树语句事实；嵌套类递归独立登记。"""
     cctx = FactContext(rel, mod, cd.name)
     bases = [dotted(b) for b in cd.bases if not isinstance(b, ast.Starred)]
@@ -149,14 +161,14 @@ def _scan_class(cd, r, rel, mod, hooks):
             continue
         if isinstance(sub, FUNC_NODES):
             r['defs'].append((rel, sub.lineno, cd.name, sub.name))
-            _scan_function(sub, r, rel, mod, cd.name, hooks)
+            _scan_function(sub, r, rel, mod, cd.name, hooks, imp_map)
         fact = hooks.class_stmt_fact(sub, cctx)
         if fact:
             r[fact[0]].append(fact[1])
         if isinstance(sub, ast.Assign):
             _scan_self_assign(sub, r, rel, cctx, hooks)
     for ncd in nested:
-        _scan_class(ncd, r, rel, mod, hooks)
+        _scan_class(ncd, r, rel, mod, hooks, imp_map)
 
 
 def _walk_no_nested_class(cd):
@@ -186,10 +198,12 @@ def _scan_self_assign(st, r, rel, cctx, hooks):
             r['attr'].append((rel, cctx.cls, tgt.attr, typ))
 
 
-def _scan_function(fn, r, rel, mod, cls, hooks):
-    """函数体一次遍历双产出：return 构造() -> ret；Call 节点 -> rpc 钩子。
+def _scan_function(fn, r, rel, mod, cls, hooks, imp_map=None):
+    """函数体一次遍历多产出：return 构造() -> ret；Call 节点 -> rpc/pubsub 钩子。
 
-    模块函数与方法的 ret 命名空间不同；rpc 钩子不分命名空间（chan 已含方向）。
+    模块函数与方法的 ret 命名空间不同；rpc/pubsub 钩子不分命名空间
+    （chan/side 已含方向）。嵌套 def 会被外层 walk 与自身扫描各访问一次，
+    pubsub 侧按 (file,line,side,event) 去重保留内层归属（见 _dedup_pubsub）。
     """
     if cls:
         func_key = '%s.%s' % (cls, fn.name)
@@ -203,7 +217,7 @@ def _scan_function(fn, r, rel, mod, cls, hooks):
                 if t not in BUILTIN_CTORS:
                     r['ret'].append((mod, func_key, t, rel))
         return
-    fctx = FactContext(rel, mod, cls)
+    fctx = FactContext(rel, mod, cls, fn.name, imp_map)
     for node in ast.walk(fn):
         if isinstance(node, ast.Return) and isinstance(node.value, ast.Call) \
                 and isinstance(node.value.func, ast.Name):
@@ -213,3 +227,20 @@ def _scan_function(fn, r, rel, mod, cls, hooks):
         elif isinstance(node, ast.Call):
             for (chan, method, stub) in hooks.rpc_facts(node, fctx):
                 r['rpc'].append((rel, node.lineno, chan, method, stub))
+            for (side, event) in hooks.pubsub_facts(node, fctx):
+                r['pubsub'].append((rel, node.lineno, side, event, fn.name, cls))
+
+
+def _dedup_pubsub(r):
+    """pubsub 行去重：同 (file,line,side,event) 保留最后一条。
+
+    嵌套 def 的装饰器/调用会被外层函数 walk 与内层自身扫描各产一行，
+    后到的属内层函数、归属更准；rpc 侧历史行为不动。
+    """
+    rows = r.get('pubsub')
+    if not rows:
+        return
+    seen = {}
+    for row in rows:
+        seen[row[:4]] = row
+    r['pubsub'] = list(seen.values())

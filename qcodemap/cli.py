@@ -76,6 +76,15 @@ def main(argv=None):
     p_rpc.add_argument('--db', default=None)
     p_rpc.add_argument('--json', action='store_true')
 
+    p_pubsub = sub.add_parser('pubsub-refs',
+                              help='事件名双端配对（发布点+订阅 handler）')
+    p_pubsub.add_argument('event', help='事件常量名（裸名或完整键）')
+    p_pubsub.add_argument('--side', default=None, choices=['listen', 'publish'],
+                          help='限定方向（可选）')
+    p_pubsub.add_argument('--root', default=None)
+    p_pubsub.add_argument('--db', default=None)
+    p_pubsub.add_argument('--json', action='store_true')
+
     p_deps = sub.add_parser('deps', help='文件/目录依赖了谁（文件级边）')
     p_deps.add_argument('target')
     p_deps.add_argument('--db', default=None)
@@ -205,6 +214,20 @@ def main(argv=None):
         try:
             out = rpc_refs.rpc_refs(store, cfg, args.method, stub=args.stub,
                                     json_out=args.json)
+        finally:
+            store.close()
+        if args.json:
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+        else:
+            print(out)
+        return 0
+    if args.cmd == 'pubsub-refs':
+        from qcodemap import pubsub_refs
+        from qcodemap.store import Store
+        store = Store(args.db or cfg.db_path)
+        try:
+            out = pubsub_refs.pubsub_refs(store, cfg, args.event,
+                                          side=args.side, json_out=args.json)
         finally:
             store.close()
         if args.json:

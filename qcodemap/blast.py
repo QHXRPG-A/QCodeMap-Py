@@ -294,6 +294,56 @@ def _impact_closure(store, cfg, funcs, depth):
                                        'via': '%s(rpc:%s)' % (target, chan)})
             if rfunc:
                 enqueue({'class': rcls, 'func': rfunc, 'file': rf}, level + 1)
+        # pubsub 事件边穿透（双向）：frontier 函数是订阅 handler -> 同事件的
+        # 发布点入影响面；frontier 是发布调用点所在函数 -> 同事件全部订阅
+        # handler 入影响面。事件键匹配即成边（非语义验证）；订阅行按
+        # file+func+cls 全等配（防同名 handler 误配），发布行按 file+func 配
+        lis = store.con.execute(
+            'SELECT event FROM pubsub WHERE side=? AND file=? AND func=? AND '
+            'cls IS ?',
+            ('listen', fn['file'], fn['func'], fn['class'])).fetchall()
+        pub = store.con.execute(
+            'SELECT event FROM pubsub WHERE side=? AND file=? AND func=?',
+            ('publish', fn['file'], fn['func'])).fetchall()
+        edges = []
+        for (e,) in lis:
+            edges.extend(
+                (e, rf, rln, rfunc, rcls) for (rf, rln, rfunc, rcls) in
+                store.con.execute(
+                    'SELECT file, line, func, cls FROM pubsub '
+                    'WHERE side=? AND event=? ORDER BY file, line',
+                    ('publish', e)))
+        for (e,) in pub:
+            edges.extend(
+                (e, rf, rln, rfunc, rcls) for (rf, rln, rfunc, rcls) in
+                store.con.execute(
+                    'SELECT file, line, func, cls FROM pubsub '
+                    'WHERE side=? AND event=? ORDER BY file, line',
+                    ('listen', e)))
+        target = ('%s.%s' % (fn['class'], fn['func'])) if fn['class'] else fn['func']
+        for (e, pf, pln, pfunc, pcls) in edges:
+            n_edges += 1
+            if n_edges > MAX_EDGES:
+                truncated = True
+                frontier = []
+                break
+            key = (pf, pln)
+            entry = {'target': target,
+                     'caller': '%s.%s' % (pcls, pfunc) if pcls else (pfunc or '?'),
+                     'caller_file': pf, 'caller_line': pln,
+                     'via_pubsub': e}
+            if level == 0:
+                if key not in seen_direct:
+                    seen_direct.add(key)
+                    direct.append(entry)
+            else:
+                if key not in seen_trans:
+                    seen_trans.add(key)
+                    transitive.append({'caller_loc': '%s:%s in %s'
+                                       % (pf, pln, entry['caller']),
+                                       'via': '%s(pubsub:%s)' % (target, e)})
+            if pfunc:
+                enqueue({'class': pcls, 'func': pfunc, 'file': pf}, level + 1)
     return direct, transitive, truncated
 
 

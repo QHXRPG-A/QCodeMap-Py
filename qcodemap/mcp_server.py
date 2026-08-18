@@ -16,6 +16,7 @@ from qcodemap import blast as blast_mod
 from qcodemap import build as build_mod
 from qcodemap import config as config_mod
 from qcodemap import context as ctx_mod
+from qcodemap import pubsub_refs as pubsub_mod
 from qcodemap import resolve as rmod
 from qcodemap import rpc_refs as rpc_mod
 from qcodemap import structure as st_mod
@@ -194,6 +195,16 @@ def _tool_rpc_refs(args):
         store.close()
 
 
+def _tool_pubsub_refs(args):
+    cfg = config_mod.load_config()
+    store = Store(cfg.db_path)
+    try:
+        return pubsub_mod.pubsub_refs(store, cfg, args['event'],
+                                      side=args.get('side'), json_out=True)
+    finally:
+        store.close()
+
+
 def _tool_find_file(args):
     cfg = config_mod.load_config()
     store = Store(cfg.db_path)
@@ -322,6 +333,21 @@ _TOOLS = [
                                                                'stub 通道精确配对用）'}},
                         'required': ['method']},
         'handler': _tool_rpc_refs,
+    },
+    {
+        'name': 'qcodemap_pubsub_refs',
+        'description': '事件名双端配对：发布调用点（EVENT-INFERRED）+ 订阅'
+                       'handler（LISTENER）。适用于 @ListenTo/@Subscribe ↔ '
+                       'Broadcast/Publish 事件分发形态的跨模块跳转。',
+        'inputSchema': {'type': 'object',
+                        'properties': {'event': {'type': 'string',
+                                                 'description': '事件常量名'
+                                                                '（裸名或完整键）'},
+                                       'side': {'type': 'string',
+                                                'description': 'listen/publish'
+                                                               '（可选）'}},
+                        'required': ['event']},
+        'handler': _tool_pubsub_refs,
     },
     {
         'name': 'qcodemap_find_file',

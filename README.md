@@ -52,6 +52,9 @@ python -m qcodemap usages HasSkywing
 python -m qcodemap rpc-refs SetPlayerAimState
 python -m qcodemap rpc-refs ObtainClan --stub ClanStub
 
+# 事件双端配对（订阅 handler ↔ 发布点，事件键 import 归一）
+python -m qcodemap pubsub-refs ON_MONEY_DMZ_COIN_CHANGE
+
 # 结构四件套（codemap 平价，无超时）
 python -m qcodemap deps <文件或目录>
 python -m qcodemap importers <文件>
@@ -68,7 +71,7 @@ python -m qcodemap find avatar_scene                   # 模糊路径搜索
 python -m qcodemap file-context src/logic/avatar.py
 python -m qcodemap context --compact                   # AI 会话冷启动注入
 
-# MCP server（stdio，13 个工具；可注册进任意 MCP 客户端）
+# MCP server（stdio，14 个工具；可注册进任意 MCP 客户端）
 python -m qcodemap mcp
 ```
 
@@ -99,12 +102,13 @@ ast 解析失败文件会在 coverage 里以 partial 状态透出，不静默残
 
 ```
 qcodemap/     核心引擎（项目无关）：cli / build / scanner / store / resolve /
-              structure / blast / context / rpc_refs / mcp_server / hooks /
-              config / defaults
+              structure / blast / context / rpc_refs / pubsub_refs /
+              mcp_server / hooks / config / defaults
 custom/       项目定制层：config.py（范围）/ facts.py（框架习语钩子）/
               seeds.py（人工种子）。仓库仅随附 README.md 模板
-tests/        七件回归套件 + original/（可行性脚本存档）；除 test_p4/test_rpc
-              自建临时库外，其余锚定孵化案例项目（需该代码库在场）
+tests/        八件回归套件 + original/（可行性脚本存档）；除 test_p4/
+              test_rpc/test_pubsub 自建临时库外，其余锚定孵化案例项目
+              （需该代码库在场）
 cache/        索引产物（441MB，可再生，不入库）
 docs/         深入文档（见下）
 ```

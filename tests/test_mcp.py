@@ -58,11 +58,12 @@ def main():
     if init.get('protocolVersion') != '2024-11-05':
         failed.append('protocolVersion 未回显')
     tools = by_id.get(2, {}).get('result', {}).get('tools', [])
-    if len(tools) != 13:
-        failed.append('tools/list 应为 13 个工具，实际 %d' % len(tools))
+    if len(tools) != 14:
+        failed.append('tools/list 应为 14 个工具，实际 %d' % len(tools))
     tool_names = {t['name'] for t in tools}
     for expect in ('qcodemap_find_file', 'qcodemap_get_file_context',
-                   'qcodemap_context', 'qcodemap_rpc_refs'):
+                   'qcodemap_context', 'qcodemap_rpc_refs',
+                   'qcodemap_pubsub_refs'):
         if expect not in tool_names:
             failed.append('缺少工具 %s' % expect)
     callers = json.loads(by_id[3]['result']['content'][0]['text'])

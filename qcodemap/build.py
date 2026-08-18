@@ -88,7 +88,8 @@ def collect_files(cfg):
 
 
 _ALL_TABLES = ('meta', 'files', 'names', 'defs', 'classes', 'imports', 'attr',
-               'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'edges')
+               'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'pubsub',
+               'edges')
 
 
 def _prepare_rebuild(db_path):
@@ -169,7 +170,8 @@ def build(cfg, rebuild=False, verbose=True):
 
 def _drop_all(store):
     for table in ('files', 'names', 'defs', 'classes', 'imports', 'attr',
-                  'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'edges'):
+                  'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'pubsub',
+                  'edges'):
         store.con.execute('DELETE FROM %s' % table)
 
 
