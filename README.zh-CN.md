@@ -18,7 +18,7 @@ LLM 和工程师的事。它只做一件事：
 
 [快速上手](#-快速上手) • [工作原理](#工作原理) • [命令](#命令) • [MCP Server](#-mcp-server) • [实测数据](#-实测数据) • [对比](#与替代方案对比)
 
-![QCodeMap 源码索引与 AI Agent 工作流](docs/qcodemap-framework.svg)
+![QCodeMap 源码索引与 AI Agent 工作流](docs/qcodemap-framework.zh-CN.svg)
 
 ## 解决什么问题
 

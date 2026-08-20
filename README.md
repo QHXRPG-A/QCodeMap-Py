@@ -23,7 +23,7 @@ one thing:
 
 [Quick Start](#-quick-start) • [How It Works](#how-it-works) • [Commands](#commands) • [MCP Server](#-mcp-server) • [Benchmarks](#-benchmarks) • [Comparison](#comparison-with-alternatives)
 
-![QCodeMap source indexing and AI agent workflow](docs/qcodemap-framework.svg)
+![QCodeMap source indexing and AI agent workflow](docs/qcodemap-framework.en.svg)
 
 ## The problem
 
