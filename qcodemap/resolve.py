@@ -12,6 +12,7 @@
 import ast
 import json
 import os
+import re
 import time
 import warnings
 
@@ -582,7 +583,7 @@ def _display(cls, func):
 #     mod.func() 调用从静默降级恢复为可验证；
 # v6: import 按词法作用域解析 + 钩子约定回调严格宿主连边；
 # v7: 约定回调边缓存纳入共同宿主文件 mtime
-RESOLVER_VERSION = 7
+RESOLVER_VERSION = 8
 
 
 # 内置函数/常见运行时名：callees 收集时的噪音过滤
@@ -669,13 +670,29 @@ def _is_call_form(resolver, rel, line, name):
     return after == '('
 
 
-def callers(store, cfg, file, func, resolver=None):
+def _receiver_fact(resolver, file, line, func):
+    expr = None
+    for call in resolver._file_index(file)['calls'].get(line, ()):
+        if isinstance(call.func, ast.Attribute) and call.func.attr == func:
+            expr = dotted(call.func.value)
+            break
+    if not expr:
+        return []
+    return resolver.con.execute(
+        'SELECT type,confidence,reason FROM receiver_fact '
+        'WHERE file=? AND line=? AND expr=? ORDER BY type',
+        (file, line, expr)).fetchall()
+
+
+def callers(store, cfg, file, func, resolver=None, receiver_class=None):
     """谁调用 <file> 的 <func>：候选 -> 调用形态过滤 -> 语义验证 -> 分级输出。
 
     resolver 可注入复用（blast 闭包逐函数调用时避免重复全表初始化）。
     """
     t0 = time.time()
     defs = _find_defs(store, file, func)
+    if receiver_class:
+        defs = [row for row in defs if row[2] == receiver_class]
     if not defs:
         note = '定义未找到（文件未索引或函数不存在）'
         row = store.con.execute(
@@ -686,7 +703,8 @@ def callers(store, cfg, file, func, resolver=None):
         return _result({'file': file, 'func': func}, [], t0, note=note, store=store)
     def_file, def_line, def_cls = defs[0]
     note = ('同名定义 %d 处，取首处' % len(defs)) if len(defs) > 1 else ''
-    cached = _load_edges(store, cfg, func, def_file, def_line, 'callers')
+    cache_kind = 'callers:%s' % (receiver_class or '')
+    cached = _load_edges(store, cfg, func, def_file, def_line, cache_kind)
     if cached is not None:
         return _result({'file': file, 'func': func}, cached, t0, cached=True,
                        note=note, store=store)
@@ -696,15 +714,32 @@ def callers(store, cfg, file, func, resolver=None):
     cands = store.con.execute(
         'SELECT f.path, n.line FROM names n JOIN files f ON n.file=f.id '
         'WHERE n.name=? ORDER BY f.path, n.line', (func,)).fetchall()
+    all_def_sites = set(store.con.execute(
+        'SELECT file,line FROM defs WHERE name=?', (func,)).fetchall())
     seen = set()
     for (f, ln) in cands:
-        if (f, ln) in [(d[0], d[1]) for d in defs] or (f, ln) in seen:
+        if (f, ln) in all_def_sites or (f, ln) in seen:
             continue
         if not _is_call_form(r, f, ln, func):
             continue
         seen.add((f, ln))
         cls, fname = r._enclosing_of(f, ln)
         got = r.resolve_call(f, ln, func)
+        receiver_facts = _receiver_fact(r, f, ln, func)
+        wanted_class = receiver_class or def_cls
+        if receiver_facts:
+            matching = [fact for fact in receiver_facts if fact[0] == wanted_class]
+            if not matching:
+                continue
+            if got != (def_file, def_line):
+                typ, _confidence, reason = matching[0]
+                items.append({
+                    'level': 'FRAMEWORK-INFERRED',
+                    'symbol': _display(typ, func), 'file': f, 'line': ln,
+                    'caller': _display(cls, fname), 'note': reason,
+                    'receiver_class': typ,
+                })
+                continue
         if got == (def_file, def_line):
             items.append({'level': 'VERIFIED', 'symbol': _display(def_cls, func),
                           'file': f, 'line': ln, 'caller': _display(cls, fname)})
@@ -728,8 +763,10 @@ def callers(store, cfg, file, func, resolver=None):
     for item in items:
         for host in item.get('via_callback', {}).get('hosts', ()):
             ref_files.add(host['file'])
-    _save_edges(store, func, def_file, def_line, 'callers', items, ref_files)
-    return _result({'file': file, 'func': func}, items, t0, note=note, store=store)
+    _save_edges(store, func, def_file, def_line, cache_kind, items, ref_files)
+    return _result({'file': file, 'func': func,
+                    'receiver_class': receiver_class}, items, t0,
+                   note=note, store=store)
 
 
 def callees(store, cfg, file, func):
@@ -773,6 +810,26 @@ def callees(store, cfg, file, func):
                 seen_sites.add(site)
                 got = r.resolve_call(def_file, call.lineno, cname)
                 if got is None:
+                    facts = _receiver_fact(r, def_file, call.lineno, cname)
+                    inferred = None
+                    if len({fact[0] for fact in facts}) == 1:
+                        typ, _confidence, reason = facts[0]
+                        for cls_file in r._class_files(typ, def_file):
+                            inferred = r.mro_has_method(typ, cls_file, cname)
+                            if inferred:
+                                break
+                    if inferred:
+                        if inferred in got_defs:
+                            continue
+                        got_defs.add(inferred)
+                        items.append({
+                            'level': 'FRAMEWORK-INFERRED',
+                            'symbol': _display(typ, cname),
+                            'file': inferred[0], 'line': inferred[1],
+                            'caller': '%s:%d' % (def_file, call.lineno),
+                            'note': reason, 'receiver_class': typ,
+                        })
+                        continue
                     items.append({'level': 'CANDIDATE', 'symbol': cname,
                                   'file': def_file, 'line': call.lineno,
                                   'caller': '%s:%d' % (def_file, call.lineno),
@@ -795,6 +852,11 @@ def callees(store, cfg, file, func):
 def usages(store, cfg, symbol, limit=200):
     """标识符全仓出现点（倒排原始行，不做逐行语义验证）+ 定义点摘要。"""
     t0 = time.time()
+    if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', symbol):
+        return _result(
+            {'symbol': symbol}, [], t0,
+            note='usages 只接受单个 Python 标识符；查类定义请用 defs X，'
+                 '搜文本请用 rg', store=store)
     rows = store.con.execute(
         'SELECT f.path, n.line, n.col FROM names n JOIN files f ON n.file=f.id '
         'WHERE n.name=? ORDER BY f.path, n.line LIMIT ?', (symbol, limit + 1)).fetchall()
@@ -810,3 +872,19 @@ def usages(store, cfg, symbol, limit=200):
     if has_more:
         note += '；出现点超 %d 截断' % limit
     return _result({'symbol': symbol}, items, t0, note=note, store=store)
+
+
+def defs(store, symbol, limit=200):
+    """精确定义查询；不混入普通 identifier 出现点。"""
+    t0 = time.time()
+    if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', symbol):
+        return _result({'symbol': symbol}, [], t0,
+                       note='defs 只接受单个 Python 标识符', store=store)
+    rows = store.con.execute(
+        'SELECT file,line,class FROM defs WHERE name=? ORDER BY file,line LIMIT ?',
+        (symbol, limit)).fetchall()
+    items = [
+        {'level': 'DEFINITION', 'symbol': _display(cls, symbol),
+         'file': file, 'line': line, 'caller': _display(cls, symbol)}
+        for file, line, cls in rows]
+    return _result({'symbol': symbol}, items, t0, store=store)

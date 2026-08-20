@@ -11,13 +11,14 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 DDL = '''
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS files(
     id INTEGER PRIMARY KEY, path TEXT UNIQUE, mtime REAL,
-    parse_ok INTEGER NOT NULL DEFAULT 1);
+    parse_ok INTEGER NOT NULL DEFAULT 1,
+    profile TEXT NOT NULL DEFAULT 'full');
 CREATE TABLE IF NOT EXISTS names(name TEXT, file INT, line INT, col INT);
 CREATE INDEX IF NOT EXISTS idx_names_name ON names(name);
 CREATE INDEX IF NOT EXISTS idx_names_file ON names(file);
@@ -39,6 +40,14 @@ CREATE INDEX IF NOT EXISTS idx_comp_host ON comp(host);
 CREATE TABLE IF NOT EXISTS rpc(file TEXT, line INT, chan TEXT, method TEXT, stub TEXT);
 CREATE INDEX IF NOT EXISTS idx_rpc_method ON rpc(method);
 CREATE INDEX IF NOT EXISTS idx_rpc_file ON rpc(file);
+CREATE TABLE IF NOT EXISTS receiver_fact(
+    file TEXT, line INT, expr TEXT, type TEXT, confidence TEXT, reason TEXT);
+CREATE INDEX IF NOT EXISTS idx_receiver_file_line ON receiver_fact(file, line);
+CREATE INDEX IF NOT EXISTS idx_receiver_type ON receiver_fact(type);
+CREATE TABLE IF NOT EXISTS rpc_handler(
+    file TEXT, line INT, chan TEXT, method TEXT, endpoint TEXT,
+    confidence TEXT, reason TEXT);
+CREATE INDEX IF NOT EXISTS idx_rpc_handler_method ON rpc_handler(method);
 CREATE TABLE IF NOT EXISTS pubsub(file TEXT, line INT, side TEXT, event TEXT, func TEXT, cls TEXT);
 CREATE INDEX IF NOT EXISTS idx_pubsub_event ON pubsub(event);
 CREATE INDEX IF NOT EXISTS idx_pubsub_file ON pubsub(file);
@@ -52,7 +61,8 @@ CREATE TABLE IF NOT EXISTS edges(
 
 # file 列直接存路径、可直接级联删除的表（names 走 file_id 单独处理）
 CASCADE_TABLES = ('defs', 'classes', 'imports', 'attr', 'global_assign',
-                  'comp_raw', 'ret', 'rpc', 'pubsub', 'callback_raw')
+                  'comp_raw', 'ret', 'rpc', 'receiver_fact', 'rpc_handler',
+                  'pubsub', 'callback_raw')
 
 
 class Store(object):
@@ -105,10 +115,10 @@ class Store(object):
         for table in CASCADE_TABLES:
             self.con.execute('DELETE FROM %s WHERE file=?' % table, (rel,))
 
-    def insert_file(self, rel, mtime, parse_ok=True):
+    def insert_file(self, rel, mtime, parse_ok=True, profile='full'):
         cur = self.con.execute(
-            'INSERT INTO files(path, mtime, parse_ok) VALUES(?,?,?)',
-            (rel, mtime, 1 if parse_ok else 0))
+            'INSERT INTO files(path, mtime, parse_ok, profile) VALUES(?,?,?,?)',
+            (rel, mtime, 1 if parse_ok else 0, profile))
         return cur.lastrowid
 
     def insert_rows(self, fid, rows):
@@ -122,8 +132,8 @@ class Store(object):
                                  [(n, fid, ln, col) for (n, ln, col) in rows['names']])
         # 其余事实表行 = 完整表行；列数以 DDL 为准，按首行宽度生成占位符
         for table in ('defs', 'classes', 'imports', 'attr',
-                      'global_assign', 'ret', 'comp_raw', 'rpc', 'pubsub',
-                      'callback_raw'):
+                      'global_assign', 'ret', 'comp_raw', 'rpc',
+                      'receiver_fact', 'rpc_handler', 'pubsub', 'callback_raw'):
             data = rows.get(table)
             if data:
                 marks = ','.join('?' * len(data[0]))

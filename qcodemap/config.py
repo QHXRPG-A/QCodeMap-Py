@@ -20,7 +20,7 @@ PROJECT_DIR = PKG_DIR.parent
 # custom/config.py 里可出现的配置键（大小写敏感）
 KNOWN_KEYS = ('ROOT', 'TARGETS', 'EXCLUDE_DIRS', 'EXCLUDE_FILES',
               'INCLUDE_PATHS', 'NAMES_DOWNSAMPLE_PREFIXES', 'DB_PATH',
-              'RPC_CHANNELS')
+              'RPC_CHANNELS', 'INDEX_PROFILE_RULES')
 
 
 class Config(object):
@@ -37,6 +37,8 @@ class Config(object):
         self.ret_seeds = {}
         self.attr_seeds = {}
         self.rpc_channels = {}  # 通道代码 -> 显示名（rpc-refs 输出用）
+        self.index_profile_rules = []  # [(glob, full|semantic-only), ...]
+        self.targets_overridden = False
         self.hooks = None  # FactsHooks 实例；None = 无框架钩子，仅通用事实
         self.custom_dir = None
 
@@ -74,6 +76,8 @@ def _apply_custom_config(cfg, mod):
             cfg.names_downsample = [str(p).replace('\\', '/') for p in (val or ())]
         elif key == 'RPC_CHANNELS':
             cfg.rpc_channels = dict(val or {})
+        elif key == 'INDEX_PROFILE_RULES':
+            cfg.index_profile_rules = [tuple(item) for item in (val or ())]
         elif key == 'DB_PATH':
             cfg.db_path = str(val)
 
@@ -112,6 +116,7 @@ def load_config(root=None, targets=None, db_path=None, custom_dir=None):
         cfg.root = str(root)
     if targets:
         cfg.targets = [t.replace('\\', '/') for t in targets]
+        cfg.targets_overridden = True
     if db_path:
         cfg.db_path = str(db_path)
     return cfg

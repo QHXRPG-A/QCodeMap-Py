@@ -1,6 +1,6 @@
 # 🗺️ QCodeMap
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.x-blue.svg)](https://www.python.org/downloads/) [![Dependencies](https://img.shields.io/badge/dependencies-0-pure%20stdlib-success.svg)]() [![MCP](https://img.shields.io/badge/MCP-14_tools-blueviolet.svg)]() [![Version](https://img.shields.io/badge/version-v0.9-orange.svg)]()
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.x-blue.svg)](https://www.python.org/downloads/) [![Dependencies](https://img.shields.io/badge/dependencies-0-pure%20stdlib-success.svg)]() [![MCP](https://img.shields.io/badge/MCP-16_tools-blueviolet.svg)]() [![Version](https://img.shields.io/badge/version-v0.9-orange.svg)]()
 
 面向 Python 代码库（尤其是大型、重框架的项目）的**语义级导航索引**：把代码里的
 定义、调用，连同框架特有的动态写法（组件注入、声明式属性、运行时注入的全局
@@ -86,19 +86,19 @@ qcodemap callers src/logic/avatar.py GetTeammateInfo
 
 ## 📊 实测数据
 
-试点项目：约 9000 文件的游戏客户端 / 服务端代码库（2026-08-18，v0.9）。
+试点项目：约 9000 文件的游戏客户端 / 服务端代码库（2026-08-20，v0.9）。
 
 | 指标 | 数值 |
 | --- | --- |
-| 全量建库 | 8927 文件 / 469s / 447MB（对照 PyCharm 同库索引 3.8GB） |
+| 全量建库 | 8950 文件 / 97.5s / 220MB（对照优化前 449MB） |
 | 语义查询（含验证） | 亚秒级；高频名首查 3s 量级 |
 | edges 缓存命中 | 0.001s |
-| 单文件增量 | 0.5s |
+| 5 文件增量 | 1s 内 |
 | 语义回归 | 5/5 标准答案边，零假边 |
 | 结构四命令 | 全库各 0.22~0.24s |
 | blast-radius | 2 文件 121 函数冷 43.2s / 热 0.7s（解析器升级后首次冷缓存） |
 | agent 查询 | find 0.004s / file-context 0.16s / context 0.34s |
-| 懒刷新 | MCP 查询发现 mtime 漂移自动增量 build，单文件级秒内 |
+| 全仓新鲜度检查 | 0.61s；CLI/MCP 自动增量刷新新增、修改、删除文件 |
 
 ## ⚡ 快速上手
 
@@ -113,6 +113,7 @@ cd QCodeMap
 # --targets：只索引项目根下这些顶层目录（逗号分隔，如 src,lib = src/ + lib/），
 # 用于跳过 tests/docs/产物等无关目录；不传则 ROOT 全量扫描
 python -m qcodemap build --root /path/to/your/project --targets src,lib
+# --targets 只刷新和清理选中范围；主动建立子集库使用 --rebuild --targets
 
 # 谁调用这个函数（VERIFIED=语义验证边 / CANDIDATE=同名候选）
 python -m qcodemap callers src/logic/avatar.py GetTeammateInfo
@@ -124,8 +125,11 @@ python -m qcodemap callers src/logic/avatar.py GetTeammateInfo
 
 ```bash
 python -m qcodemap callers src/logic/avatar.py GetTeammateInfo  # 谁调用它
+python -m qcodemap callers src/logic/avatar.py Activate --receiver-class FestivalTargetEntity
 python -m qcodemap callees src/logic/avatar.py RefreshToplogo   # 它调了谁
 python -m qcodemap usages HasSkywing                            # 标识符全仓出现点
+python -m qcodemap defs HasSkywing                              # 定义点
+python -m qcodemap diagnose                                     # custom 项目诊断
 ```
 
 ### RPC 与事件双端配对
@@ -166,8 +170,10 @@ python -m qcodemap file-context src/logic/avatar.py  # 单文件信息一次打�
 python -m qcodemap context --compact                 # 新会话开场的项目摘要
 ```
 
-所有命令支持 `--json` 机器可读输出（带 `schema_version` 与 `coverage`；
-ast 解析失败的文件会在 coverage 里标成 partial，不会悄悄缺数据）。
+所有查询命令统一支持 `--root`、`--db`、`--json` 和
+`--refresh auto|check|off`。JSON 输出带 `schema_version`、`coverage` 和
+`index` 元数据（构建时间、刷新情况、漂移数量、配置指纹与覆盖状态）；
+ast 解析失败的文件会在 coverage 里标成 partial，不会悄悄缺数据。
 `blast-radius` 的 CLI 默认 `full` 保持兼容；MCP 默认 `summary`，
 避免一次把海量结果塞满上下文，需要明细时用
 `mode=page, section, layer, offset, limit` 分页取。
@@ -181,8 +187,8 @@ ast 解析失败的文件会在 coverage 里标成 partial，不会悄悄缺数�
   **桩里的知识变成库里的数据**
 - 查询分两步：先按名字倒排召回候选，再做语义验证（MRO / 组件边 /
   数据流 / 返回值来源）
-- 索引产物在 `cache/`，和源码完全分离、随时可重建；MCP 查询发现 mtime
-  变化会自动增量刷新
+- 索引产物在 `cache/`，和源码完全分离、随时可重建；CLI/MCP 查询默认扫描
+  全仓文件集和 mtime，发现新增、修改或删除后自动增量刷新
 - 核心引擎不认识任何具体项目；项目相关的写法和索引范围都放在 `custom/`
   定制层（仓库里只带模板说明，见 custom/README.md），换项目不用动核心
 
@@ -191,6 +197,7 @@ ast 解析失败的文件会在 coverage 里标成 partial，不会悄悄缺数�
 ## 输出分级（宁可漏报，不误报）
 
 - `VERIFIED`：语义验证链路（MRO / 组件边 / 数据流 / 返回值）落到了目标定义
+- `FRAMEWORK-INFERRED`：custom 提供了可靠 receiver 类型证据，已收敛同名候选
 - `CANDIDATE`：调用形态成立但解析不可达，或同名有歧义，会注明解析到了哪个同名定义
 - `RPC-INFERRED` / `EVENT-INFERRED` / `PROPERTY-INFERRED`：按 custom 声明的
   框架约定推断，保留通道或共同运行时宿主证据，不冒充语义验证
@@ -199,7 +206,7 @@ ast 解析失败的文件会在 coverage 里标成 partial，不会悄悄缺数�
 ## 🔌 MCP Server
 
 ```bash
-python -m qcodemap mcp   # stdio，14 个工具，可注册进任意 MCP 客户端
+python -m qcodemap mcp   # stdio，16 个工具，可注册进任意 MCP 客户端
 ```
 
 注册后，AI agent 查代码直接查库：callers / callees 定位调用链、

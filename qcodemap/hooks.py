@@ -22,14 +22,15 @@ class FactContext(object):
     把 events.X 这类引用归一成可 join 的完整常量键。
     """
 
-    __slots__ = ('rel', 'mod', 'cls', 'func', 'imports')
+    __slots__ = ('rel', 'mod', 'cls', 'func', 'imports', 'function_node')
 
-    def __init__(self, rel, mod, cls, func=None, imports=None):
+    def __init__(self, rel, mod, cls, func=None, imports=None, function_node=None):
         self.rel = rel
         self.mod = mod
         self.cls = cls
         self.func = func
         self.imports = imports
+        self.function_node = function_node
 
 
 class FactsHooks(object):
@@ -91,4 +92,25 @@ class FactsHooks(object):
         稳定类型名，source 是声明项，target 是目标方法名。core 只负责
         保存和按类/继承/@Components 共同宿主验证，不认识具体框架语法。
         """
+        return []
+
+    def receiver_type_facts(self, call, ctx):
+        """调用表达式 -> [(expr, type, confidence, reason), ...]。
+
+        expr 是 receiver 的源码式点分名，type 是类型名；confidence/reason
+        对 core 不透明，只用于分级和解释。框架路由、实体查询、类型守卫等
+        证据应由 custom 在这里归一，core 不识别任何框架 API。
+        """
+        return []
+
+    def handler_facts(self, fn, ctx):
+        """函数定义 -> [(chan, method, endpoint, confidence, reason), ...]。
+
+        chan 为调用方向，endpoint 通常是宿主类；confidence 建议使用
+        verified/inferred。装饰器与 stub 约定由 custom 解释。
+        """
+        return []
+
+    def project_diagnostics(self, store, cfg):
+        """项目级诊断 -> [dict, ...]；core 只负责调用和包装结果。"""
         return []

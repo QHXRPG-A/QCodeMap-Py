@@ -29,25 +29,27 @@
 | `cli.py` | argparse 入口，全部子命令接线 | 子命令参数用 getattr 兜底（不是每个 subparser 都有全部参数） |
 | `config.py` | 配置装载：defaults ← custom ← CLI 三级覆盖 | custom 按文件路径 importlib 动态加载，核心包不 import custom 的任何名字 |
 | `defaults.py` | 内建默认配置 | 保证裸核心（无 custom）对任意 Python 目录可用 |
-| `hooks.py` | 事实提取钩子协议（FactsHooks/FactContext） | 框架习语与核心的唯一接缝，见 CUSTOM_GUIDE |
-| `scanner.py` | 单文件扫描：names 倒排 + defs/classes/词法 imports + 事实原始行 | 全作用域 import 落库，函数钩子只见模块+词法父函数；bytes 字面量剔除；ast 失败仅保 names |
-| `store.py` | SQLite 封装：DDL / files 登记（mtime）/ file 级联删除 | names.file 用 file_id 整型（大表省空间），其余事实表 file 列直接存路径 |
-| `build.py` | 遍历 + mtime 增量 + pass2 组件解析 | 组件边保留 host_file 精确身份；装饰器解析只消费模块级 import |
+| `hooks.py` | 事实提取钩子协议（FactsHooks/FactContext） | 通用 receiver/handler/diagnostics 协议是框架习语与核心的唯一接缝，见 CUSTOM_GUIDE |
+| `scanner.py` | 单文件扫描：names 倒排 + defs/classes/词法 imports + 事实原始行 | Python tokenizer 只收 NAME；semantic-only 不写 names；ast 失败保留可用事实 |
+| `store.py` | SQLite 封装：DDL / files 登记（mtime/profile）/ file 级联删除 | names.file 用 file_id；receiver_fact/rpc_handler 分别保存接收者与 handler 证据 |
+| `build.py` | 遍历 + mtime/profile 增量 + pass2 组件解析 | partial targets 只清理范围内；普通增量不 VACUUM；大库并行 scan 并分阶段报时 |
 | `resolve.py` | 两阶段语义验证 + callers/callees/usages + 约定回调 + edges 缓存 | 性能敏感区，见 §4 |
 | `structure.py` | deps/importers/hubs/tree 结构四命令 | 纯 SQL + 内存 modmap，无 ast-grep；coverage 按 scope 内 parse_ok 给 partial |
 | `blast.py` | 变更影响面：变更集采集 + 调用链闭包 + 输出投影 | 完整计算后提供 summary/page/full；caller 按 layer、importers 独立分页 |
 | `rpc_refs.py` | RPC 双端配对查询：rpc 表调用点 + defs 表 handler | RPC-INFERRED/HANDLER 分级；stub 精确配对优先，方法名兜底 |
 | `pubsub_refs.py` | 事件双端配对查询：pubsub 表两侧事实 | EVENT-INFERRED/LISTENER 分级；裸事件名按后缀匹配分组（防跨端撞名） |
 | `context.py` | agent 消费面三命令：find_file / get_file_context / context | 全查表无 ast 现扫；context 为一次性项目档案（qcodemap.context/v1） |
-| `mcp_server.py` | stdio JSON-RPC MCP server（14 工具） | 自举 UTF-8；日志一律 stderr；blast 默认 summary；目标文件型工具带懒刷新 |
+| `freshness.py` | 查询前新鲜度契约 | auto/check/off；全仓文件集+mtime 增量刷新；配置/schema/hook 指纹不匹配拒绝旧结果 |
+| `diagnostics.py` | custom 项目诊断汇总 | 核心只聚合统一诊断事实，不识别项目框架 |
+| `mcp_server.py` | stdio JSON-RPC MCP server（16 工具） | 自举 UTF-8；日志一律 stderr；全查询 auto refresh，进程内 1 秒节流 |
 | `custom/` | 项目定制层（config/facts/seeds 三件，仓库仅随附模板说明） | 见 CUSTOM_GUIDE |
 
 ## 3. 表结构（store.DDL）
 
 | 表 | 内容 | 规模 |
 | --- | --- | --- |
-| `files` | id / path / mtime / parse_ok，增量与级联删除的锚点；parse_ok=0 即 ast 失败（索引仅 names） | 8925 |
-| `names` | 标识符倒排（name, file_id, line, col），阶段1 唯一大表 | ~765 万（降采样后） |
+| `files` | id / path / mtime / profile / parse_ok，增量与级联删除的锚点 | 8950 |
+| `names` | 标识符倒排（name, file_id, line, col）；semantic-only 不写入 | ~353 万 |
 | `defs` / `classes` | 函数/类定义（file, line, class, name；类含 bases 逗号串） | 数万 |
 | `imports` | (file, module, name, alias, line, scope)，相对导入归一；结构图消费全部作用域 | ~30 万 |
 | `attr` | 属性类型事实：Property 声明（含第二参数类型）+ self.X=构造 | 数万 |
@@ -57,6 +59,8 @@
 | `rpc` | 字符串分发 RPC 调用点：(file, line, chan, method, stub)，stub 可 NULL | 数千（见附录 F） |
 | `pubsub` | 事件分发两侧事实：(file, line, side, event, func, cls)，event 是 import 归一的常量键 | 数千（见附录 G） |
 | `callback_raw` | custom 声明的通用约定回调：(file,line,class,kind,source,target) | 数千 |
+| `receiver_fact` | custom 提供的调用点 receiver 类型证据 | 按项目规则增长 |
+| `rpc_handler` | custom 提供的 RPC handler、方向、端点与证据等级 | 按项目规则增长 |
 | `edges` | 查询结果缓存（name+def+kind 主键，payload 含 mtimes 与版本） | 按查询增长 |
 | `meta` | schema 版本 / 构建统计 | - |
 
@@ -100,14 +104,10 @@ edges 缓存键含解析器行为版本（resolve.py 顶部常量）。任何影
 历史教训：修了镜像类消歧后旧缓存仍命中，VERIFIED 停在错误值。
 
 ### 5.5 表格目录专用索引策略
-部分 data 目录下的 .py 是 bindict 二进制（bytes 字面量），
-`*_origin.py` 是其明文版本。处理链：
-- INCLUDE_PATHS 路径级放行（优先于 'data' 目录名排除）；
-- include 路径内豁免 `*_origin.py` 文件级排除（明文版才有语义可查）；
-- token 化前剔除 bytes 字面量（转义序列是伪 token 洪流：曾致 names
-  560万→2894万、库 1.5GB）；
-- 降采样：每文件每标识符只记首处（表格 key 重复上万行，行级重复纯是体积）；
-- rebuild 后 VACUUM（SQLite 删除不还页，实测 1.5GB 虚胖缩回 441MB）。
+路径可通过 `INDEX_PROFILE_RULES` 配置 `full` 或 `semantic-only`。后者保留
+结构和语义事实但不写海量 identifier names；对超大纯数据模块只保留顶层
+import 与行数。profile 属于配置指纹，变化后必须完整重建。普通增量不
+VACUUM，仅 `--rebuild` 或显式 `--vacuum` 执行。
 
 ### 5.6 import 解析（build.py `_import_target_files`）
 `from M import N` 的 N 可能是子模块（落 `M/N.py`）也可能是 M 内的名字
@@ -124,12 +124,12 @@ structure 按 scope（deps/importers 的目标集）给 partial 并附 issues �
 清单；callers 对候选落在坏文件的边注明「所在文件 ast 解析失败」，agent
 可区分「索引残缺」与「语义歧义」。对齐 codemap 的 complete/partial 契约。
 
-### 5.8 懒刷新（P4：替代后台守护）
-MCP 目标文件型工具（callers/callees/deps/importers/get_file_context/blast）
-查询前 drift_check：目标文件 mtime 与库内漂移 → 先增量 build（单文件亚秒）
-再查。上限 1000 文件（大目录 scope 放弃检测）。刷新走独立连接且在查询
-Store 打开之前（并发写锁库）。usages/hubs/tree/context/rpc_refs 无明确
-目标文件，不接入（全库 stat 不成比例）。结果附 `refresh{files, elapsed}` 摘要。
+### 5.8 统一新鲜度
+所有 CLI/MCP 查询按 `auto|check|off` 执行全仓文件集与 mtime 检查；auto
+只增量刷新新增、修改、删除文件，check 只报告漂移，off 明确接受旧库。
+MCP 的 auto 检查进程内节流 1 秒。schema、配置、profile 或 custom hook
+指纹不匹配时拒绝返回旧结果，不在查询路径静默触发完整重建。JSON 统一返回
+`index` 元数据。本项目约 8950 文件的新鲜度扫描实测 0.61 秒。
 
 ### 5.9 RPC 双端配对（P3-2：字符串分发的约定边）
 孵化案例的 RPC 全部是字符串分发（`CallServer('X', ...)` / `CallClient` /
@@ -203,9 +203,10 @@ CLI 默认 full 保持旧行为；MCP 默认 summary。page 模式以 callers/im
 | `test_scale.py` | 全库规模/查询/缓存指标，文件数 ±1% 容差 | 增量秒级（--rebuild 全量） |
 | `test_structure.py` | 四命令输出正确性 + hubs 锚点方向 | ~1s |
 | `test_blast.py` | 闭包命中已知边（--files 模式，不依赖 svn） | 秒级（缓存热后） |
-| `test_mcp.py` | 进程内协议全流程（14 工具）+ 真子进程冒烟 | ~10s |
+| `test_mcp.py` | 进程内协议全流程（16 工具）+ 真子进程冒烟 | ~10s |
 | `test_p4.py` | 覆盖率契约 + 三新命令 + 懒刷新（临时小库自建） | ~2s |
 | `test_rpc.py` | RPC 分发提取 + rpc-refs 配对 + blast 穿透（临时小库） | ~2s |
 | `test_pubsub.py` | pubsub 双端提取 + 事件归一 join + blast 穿透（临时小库） | ~2s |
+| `test_p5.py` | partial targets、新鲜度、指纹、profile、receiver、RPC、诊断、UTF-8、blast hunk | ~6s |
 
-动任何 qcodemap/ 代码后八个全跑；只动 custom/ 跑 feasibility + scale 即可。
+动任何 qcodemap/ 代码后全部回归都跑；只动 custom/ 至少跑 feasibility、scale、p5。

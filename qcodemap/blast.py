@@ -11,11 +11,15 @@
 """
 
 import re
+import ast
+import json
+import os
 import subprocess
 import time
 
 from qcodemap import resolve as rmod
 from qcodemap import structure as st
+from qcodemap.scanner import module_of
 
 MAX_EDGES = 1000  # 闭包安全上限：超过即截断并在输出标注
 MAX_NAME_CANDS = 1500  # 超高频名冷验证分钟级且影响面无增量信息，只吃缓存
@@ -24,14 +28,14 @@ BLAST_SCHEMA_VERSION = 'qcodemap.blast/v2'
 
 
 def collect_svn_status(cfg):
-    """工作副本变更（svn st）：M/A 的 .py 文件。只读操作。"""
+    """工作副本变更（svn st）：M/A/D 的 .py 文件。只读操作。"""
     out = _svn(['st', cfg.root])
     files = []
     for line in out.splitlines():
         if len(line) < 8:
             continue
         status, path = line[0], line[7:].strip()
-        if status in 'MA' and path.endswith('.py'):
+        if status in 'MAD' and path.endswith('.py'):
             files.append(_svn_rel(cfg, path))
     return files
 
@@ -61,28 +65,107 @@ def _svn_rel(cfg, path):
     return p.lstrip('/')
 
 
-def changed_functions(store, cfg, file, diff_text=None):
+def collect_working_diffs(cfg, files):
+    """svn 工作副本 diff；干净/未跟踪显式文件保留整文件语义。"""
+    diffs = {}
+    old_sources = {}
+    for rel in files:
+        path = os.path.join(cfg.root, rel.replace('/', os.sep))
+        diff = _svn(['diff', path])
+        if diff.strip():
+            diffs[rel] = diff
+            old_sources[rel] = _svn(['cat', '-r', 'BASE', path])
+    return diffs, old_sources
+
+
+def _ast_functions(text, file):
+    if not text:
+        return []
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    out = []
+    for cls in [None] + [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+        nodes = tree.body if cls is None else cls.body
+        for fn in nodes:
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            out.append({
+                'file': file, 'class': cls.name if cls else None,
+                'func': fn.name, 'line': fn.lineno,
+                'end_line': fn.end_lineno or fn.lineno,
+                'class_node': cls,
+            })
+    return out
+
+
+def _module_level_changed(text, ranges):
+    if not text or not ranges:
+        return False
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    for node in tree.body:
+        if not isinstance(node, (ast.Import, ast.ImportFrom, ast.Assign,
+                                 ast.AnnAssign, ast.AugAssign)):
+            continue
+        end = node.end_lineno or node.lineno
+        if any(a <= end and b >= node.lineno for a, b in ranges):
+            return True
+    return False
+
+
+def changed_functions(store, cfg, file, diff_text=None, old_text=None):
     """变更文件 -> 变更函数清单。
 
     有 diff：hunk new 侧行区间 × defs 行号（近似 enclosing，一个 def 的区间
     到同文件下一个 def 前，标注启发式）；无 diff（--files 模式）：全部 def。
     """
-    defs = store.con.execute(
-        'SELECT line, class, name FROM defs WHERE file=? ORDER BY line',
-        (file,)).fetchall()
-    if not defs:
-        return []
     if diff_text is None:
+        defs = store.con.execute(
+            'SELECT line, class, name FROM defs WHERE file=? ORDER BY line',
+            (file,)).fetchall()
         return [{'file': file, 'class': c, 'func': n, 'line': ln, 'heuristic': False}
                 for (ln, c, n) in defs]
-    ranges = _hunk_new_ranges(diff_text)
-    result = []
-    for i, (ln, c, n) in enumerate(defs):
-        end = defs[i + 1][0] - 1 if i + 1 < len(defs) else ln + 2000
-        if any(a <= end and b >= ln for (a, b) in ranges):
-            result.append({'file': file, 'class': c, 'func': n,
-                           'line': ln, 'heuristic': True})
-    return result
+    try:
+        from qcodemap.scanner import read_source
+        new_text = read_source(os.path.join(cfg.root, file.replace('/', os.sep)))
+    except OSError:
+        new_text = ''
+    old_ranges, new_ranges = _hunk_ranges(diff_text)
+    selected = {}
+    for side, text, ranges in (('new', new_text, new_ranges),
+                               ('old', old_text, old_ranges)):
+        funcs = _ast_functions(text, file)
+        classes = {id(fn['class_node']): fn['class_node'] for fn in funcs
+                   if fn['class_node'] is not None}
+        changed_classes = set()
+        for key, cls in classes.items():
+            first_method = min((fn['line'] for fn in funcs
+                                if fn['class_node'] is cls), default=cls.end_lineno or cls.lineno)
+            header_start = min([cls.lineno]
+                               + [d.lineno for d in cls.decorator_list])
+            if any(a <= first_method - 1 and b >= header_start for a, b in ranges):
+                changed_classes.add(key)
+        for fn in funcs:
+            hit = id(fn['class_node']) in changed_classes or any(
+                a <= fn['end_line'] and b >= fn['line'] for a, b in ranges)
+            if not hit:
+                continue
+            key = (fn['class'], fn['func'])
+            item = {k: v for k, v in fn.items() if k != 'class_node'}
+            item.update({'heuristic': False, 'side': side,
+                         'deleted': side == 'old'})
+            if side == 'new' or key not in selected:
+                selected[key] = item
+    new_keys = {(i['class'], i['func']) for i in selected.values()
+                if i['side'] == 'new'}
+    for item in selected.values():
+        if (item['class'], item['func']) in new_keys:
+            item['deleted'] = False
+    return sorted(selected.values(), key=lambda i: (i['line'], i['func']))
 
 
 def changed_callbacks(store, file, diff_text=None):
@@ -96,7 +179,8 @@ def changed_callbacks(store, file, diff_text=None):
     return [row for row in rows if any(a <= row[1] <= b for a, b in ranges)]
 
 
-_HUNK_RE = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')
+_HUNK_RE = re.compile(
+    r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
 
 
 def _hunk_new_ranges(diff_text):
@@ -105,16 +189,32 @@ def _hunk_new_ranges(diff_text):
     for line in diff_text.splitlines():
         m = _HUNK_RE.match(line)
         if m:
-            start = int(m.group(1))
-            count = int(m.group(2) or 1)
+            start = int(m.group(3))
+            count = int(m.group(4) or 1)
             if count > 0:
                 ranges.append((start, start + count - 1))
     return ranges
 
 
+def _hunk_ranges(diff_text):
+    old = []
+    new = []
+    for line in diff_text.splitlines():
+        match = _HUNK_RE.match(line)
+        if not match:
+            continue
+        old_start, old_count = int(match.group(1)), int(match.group(2) or 1)
+        new_start, new_count = int(match.group(3)), int(match.group(4) or 1)
+        if old_count:
+            old.append((old_start, old_start + old_count - 1))
+        if new_count:
+            new.append((new_start, new_start + new_count - 1))
+    return old, new
+
+
 def blast(store, cfg, files=None, rev=None, depth=3, use_svn_status=True,
           json_out=False, mode='full', section='callers', layer=1,
-          offset=0, limit=50):
+          offset=0, limit=50, diffs=None, old_sources=None):
     """主入口：变更集 -> 影响报告。files/rev 均未给时走 svn st。"""
     t0 = time.time()
     depth = depth or 99
@@ -122,25 +222,43 @@ def blast(store, cfg, files=None, rev=None, depth=3, use_svn_status=True,
     # 1. 变更集
     if files:
         changed = [f.replace('\\', '/') for f in files]
-        diffs = {}
+        if diffs is None:
+            diffs, old_sources = collect_working_diffs(cfg, changed)
     elif rev:
         changed = collect_svn_diff(cfg, rev)
         diffs = {f: _svn(['diff', '-r', rev,
                           cfg.root.rstrip('/\\') + '/' + f]) for f in changed}
+        old_sources = {f: _svn(['cat', '-r', rev.split(':', 1)[0],
+                                cfg.root.rstrip('/\\') + '/' + f])
+                       for f in changed}
     elif use_svn_status:
         changed = collect_svn_status(cfg)
-        diffs = {}
+        diffs, old_sources = collect_working_diffs(cfg, changed)
     else:
         changed = []
         diffs = {}
+        old_sources = {}
     changed = [f for f in changed if not f.startswith('cache/')]
 
     # 2. 变更函数
     funcs = []
     callbacks = []
+    module_changes = []
     for f in changed:
-        funcs.extend(changed_functions(store, cfg, f, diffs.get(f)))
+        funcs.extend(changed_functions(store, cfg, f, diffs.get(f),
+                                       (old_sources or {}).get(f)))
         callbacks.extend(changed_callbacks(store, f, diffs.get(f)))
+        if diffs.get(f):
+            old_ranges, new_ranges = _hunk_ranges(diffs[f])
+            try:
+                from qcodemap.scanner import read_source
+                current = read_source(os.path.join(
+                    cfg.root, f.replace('/', os.sep)))
+            except OSError:
+                current = ''
+            if (_module_level_changed(current, new_ranges)
+                    or _module_level_changed((old_sources or {}).get(f), old_ranges)):
+                module_changes.append(f)
 
     # 3. 调用链闭包（VERIFIED 边）
     direct, transitive, truncated = _impact_closure(
@@ -152,6 +270,11 @@ def blast(store, cfg, files=None, rev=None, depth=3, use_svn_status=True,
     for f in changed:
         dsts = set(idx.scope_files(f))
         if not dsts:
+            mod = module_of(f)
+            for source, module, name in store.con.execute(
+                    'SELECT file,module,name FROM imports WHERE module=? OR module LIKE ?',
+                    (mod, mod + '.%')):
+                imp_by_file.setdefault(f, set()).add(source)
             continue
         for (s, d) in idx.edges:
             if d in dsts and s not in imp_by_file.get(f, set()) | {f}:
@@ -165,6 +288,7 @@ def blast(store, cfg, files=None, rev=None, depth=3, use_svn_status=True,
             {'file': f, 'line': ln, 'class': cls, 'kind': kind,
              'source': source, 'target': target}
             for f, ln, cls, kind, source, target in callbacks],
+        'module_changes': sorted(module_changes),
         'direct_callers': sorted(
             direct, key=lambda i: (i['layer'], i['caller_file'],
                                    i['caller_line'], i['target'])),
@@ -228,6 +352,7 @@ def _project_report(report, mode, section, layer, offset, limit, depth):
         'changed_files': len(report['changed_files']),
         'changed_functions': len(report['changed_functions']),
         'changed_callbacks': len(report['changed_callbacks']),
+        'module_changes': len(report.get('module_changes', ())),
         'callers_total': len(callers),
         'caller_layers': [{'layer': n, 'total': by_layer[n]}
                           for n in sorted(by_layer)],
@@ -324,6 +449,30 @@ def _impact_closure(store, cfg, funcs, depth, callbacks=None):
 
     for fn in funcs:
         # 变更函数的定义限定在其文件内（--files 模式下 file 一定有值）
+        if fn.get('deleted'):
+            rows = store.con.execute(
+                'SELECT payload FROM edges WHERE name=? AND def_file=? AND def_line=? '
+                "AND kind LIKE 'callers%'",
+                (fn['func'], fn.get('file'), fn.get('line'))).fetchall()
+            for (payload,) in rows:
+                try:
+                    snapshot_items = json.loads(payload).get('items', ())
+                except (TypeError, ValueError):
+                    snapshot_items = ()
+                for item in snapshot_items:
+                    if item.get('level') != 'VERIFIED':
+                        continue
+                    key = (item['file'], item['line'])
+                    if key in seen_direct:
+                        continue
+                    seen_direct.add(key)
+                    direct.append({
+                        'layer': 1,
+                        'target': rmod._display(fn['class'], fn['func']),
+                        'caller': item['caller'], 'caller_file': item['file'],
+                        'caller_line': item['line'], 'snapshot': True,
+                    })
+            continue
         if fn.get('file'):
             rows = store.con.execute(
                 'SELECT line FROM defs WHERE class IS ? AND name=? AND file=?',

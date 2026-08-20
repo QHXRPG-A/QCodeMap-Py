@@ -17,6 +17,29 @@ from qcodemap import build as build_mod
 from qcodemap import config as config_mod
 
 
+def _force_utf8(stream, errors='strict'):
+    reconfigure = getattr(stream, 'reconfigure', None)
+    if reconfigure:
+        try:
+            reconfigure(encoding='utf-8', errors=errors)
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+
+def _complete_query_options(parsers):
+    """所有查询命令共用一致的仓库/库/输出/刷新参数。"""
+    for parser in parsers:
+        dests = {a.dest for a in parser._actions}
+        if 'root' not in dests:
+            parser.add_argument('--root', default=None)
+        if 'db' not in dests:
+            parser.add_argument('--db', default=None)
+        if 'json' not in dests:
+            parser.add_argument('--json', action='store_true')
+        parser.add_argument('--refresh', choices=['auto', 'check', 'off'],
+                            default='auto')
+
+
 def _apply_db_root(cfg, db_override):
     """查询库 meta 里记的建库 root 回填 cfg（无库/无 meta 静默跳过）。"""
     import sqlite3
@@ -26,15 +49,24 @@ def _apply_db_root(cfg, db_override):
         try:
             row = con.execute(
                 "SELECT value FROM meta WHERE key='root'").fetchone()
+            targets_row = con.execute(
+                "SELECT value FROM meta WHERE key='targets_json'").fetchone()
+            coverage_row = con.execute(
+                "SELECT value FROM meta WHERE key='coverage_status'").fetchone()
         finally:
             con.close()
     except sqlite3.Error:
         return
     if row and os.path.isdir(row[0]):
         cfg.root = row[0]
+    if (coverage_row and coverage_row[0] == 'targeted' and targets_row):
+        cfg.targets = json.loads(targets_row[0])
+        cfg.targets_overridden = True
 
 
 def main(argv=None):
+    _force_utf8(sys.stdout)
+    _force_utf8(sys.stderr, errors='backslashreplace')
     ap = argparse.ArgumentParser(prog='qcodemap',
                                  description='桩语义数据化 + 倒排索引的调用链查询')
     ap.add_argument('--custom', default=None, help='custom 目录路径（默认包平级 custom/）')
@@ -47,6 +79,8 @@ def main(argv=None):
                               '跳过 tests/docs 等无关目录；不传则 ROOT 全量')
     p_build.add_argument('--db', default=None, help='索引库路径（缺省 cache/qcodemap.db）')
     p_build.add_argument('--rebuild', action='store_true', help='删库重建')
+    p_build.add_argument('--vacuum', action='store_true', help='显式回收 SQLite 空闲页')
+    p_build.add_argument('--json', action='store_true')
 
     p_callers = sub.add_parser('callers', help='谁调用这个函数')
     p_callers.add_argument('file', help='函数所在文件（相对 root 的路径）')
@@ -54,6 +88,8 @@ def main(argv=None):
     p_callers.add_argument('--root', default=None)
     p_callers.add_argument('--db', default=None)
     p_callers.add_argument('--json', action='store_true')
+    p_callers.add_argument('--receiver-class', default=None,
+                           help='限定 receiver 类型证据')
 
     p_callees = sub.add_parser('callees', help='这个函数调了谁')
     for arg in ('file', 'func'):
@@ -140,6 +176,17 @@ def main(argv=None):
     p_ctx.add_argument('--db', default=None)
     p_ctx.add_argument('--json', action='store_true')
 
+    p_defs = sub.add_parser('defs', help='精确查询符号定义')
+    p_defs.add_argument('symbol')
+    p_defs.add_argument('--limit', type=int, default=200)
+
+    p_diagnose = sub.add_parser('diagnose', help='运行 custom 项目级诊断')
+
+    _complete_query_options((
+        p_callers, p_callees, p_usages, p_rpc, p_pubsub, p_deps, p_imp,
+        p_hubs, p_tree, p_blast, p_find, p_fctx, p_ctx, p_defs, p_diagnose,
+    ))
+
     sub.add_parser('mcp', help='启动 MCP server（stdio JSON-RPC）')
 
     args = ap.parse_args(argv)
@@ -149,13 +196,29 @@ def main(argv=None):
                                  db_path=getattr(args, 'db', None),
                                  custom_dir=args.custom)
     if args.cmd == 'build':
-        build_mod.build(cfg, rebuild=args.rebuild)
+        stats = build_mod.build(cfg, rebuild=args.rebuild, vacuum=args.vacuum)
+        if args.json:
+            print(json.dumps(stats, ensure_ascii=False, indent=2))
+        return 0
+    if args.cmd == 'mcp':
+        from qcodemap import mcp_server
+        mcp_server.serve()
         return 0
     # 查询命令：--root 未显式给出时优先用建库时落的 meta.root。
     # 跨项目场景（--db 指别的库）漏带 --root，默认 cwd 是错的根目录，
     # 语义验证读源码会 FileNotFoundError
     if not getattr(args, 'root', None):
         _apply_db_root(cfg, getattr(args, 'db', None))
+    from qcodemap import freshness
+    index_meta = None
+    blast_snapshot = None
+    if args.cmd == 'blast-radius' and not args.rev:
+        from qcodemap import blast as blast_probe
+        changed = (args.files.split(',') if args.files
+                   else blast_probe.collect_svn_status(cfg))
+        diffs, old_sources = blast_probe.collect_working_diffs(cfg, changed)
+        blast_snapshot = (changed, diffs, old_sources)
+    index_meta = freshness.ensure_fresh(cfg, mode=args.refresh)
     # 结构四命令：不依赖语义解析，直接查表
     if args.cmd in ('deps', 'importers', 'hubs', 'tree'):
         from qcodemap import structure as st
@@ -173,13 +236,10 @@ def main(argv=None):
         finally:
             store.close()
         if args.json:
+            freshness.attach_index(out, index_meta)
             print(json.dumps(out, ensure_ascii=False, indent=2))
         else:
             print(out)
-        return 0
-    if args.cmd == 'mcp':
-        from qcodemap import mcp_server
-        mcp_server.serve()
         return 0
     if args.cmd in ('find', 'file-context', 'context'):
         from qcodemap import context as ctx
@@ -197,6 +257,7 @@ def main(argv=None):
         finally:
             store.close()
         if args.json:
+            freshness.attach_index(out, index_meta)
             print(json.dumps(out, ensure_ascii=False, indent=2))
         else:
             print(out)
@@ -206,14 +267,19 @@ def main(argv=None):
         from qcodemap.store import Store
         store = Store(args.db or cfg.db_path)
         try:
+            bfiles = blast_snapshot[0] if blast_snapshot else (
+                args.files.split(',') if args.files else None)
             out = blast.blast(store, cfg,
-                              files=args.files.split(',') if args.files else None,
+                              files=bfiles,
                               rev=args.rev, depth=args.depth or 99, json_out=args.json,
                               mode=args.mode, section=args.section, layer=args.layer,
-                              offset=args.offset, limit=args.limit)
+                              offset=args.offset, limit=args.limit,
+                              diffs=blast_snapshot[1] if blast_snapshot else None,
+                              old_sources=blast_snapshot[2] if blast_snapshot else None)
         finally:
             store.close()
         if args.json:
+            freshness.attach_index(out, index_meta)
             print(json.dumps(out, ensure_ascii=False, indent=2))
         else:
             print(out)
@@ -228,6 +294,7 @@ def main(argv=None):
         finally:
             store.close()
         if args.json:
+            freshness.attach_index(out, index_meta)
             print(json.dumps(out, ensure_ascii=False, indent=2))
         else:
             print(out)
@@ -242,21 +309,44 @@ def main(argv=None):
         finally:
             store.close()
         if args.json:
+            freshness.attach_index(out, index_meta)
             print(json.dumps(out, ensure_ascii=False, indent=2))
         else:
             print(out)
         return 0
     from qcodemap import resolve
+    if args.cmd == 'diagnose':
+        from qcodemap import diagnostics
+        from qcodemap.store import Store
+        store = Store(args.db or cfg.db_path)
+        try:
+            out = diagnostics.diagnose(store, cfg)
+        finally:
+            store.close()
+        freshness.attach_index(out, index_meta)
+        if args.json:
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+        else:
+            print('diagnose: %d issue(s)' % out['count'])
+            for item in out['issues']:
+                print('  [%s] %s:%s %s' % (
+                    item.get('code'), item.get('file'), item.get('line'),
+                    item.get('message')))
+        return 0
     store = resolve.Store(args.db or cfg.db_path)
     try:
         if args.cmd == 'callers':
-            out = resolve.callers(store, cfg, args.file, args.func)
+            out = resolve.callers(store, cfg, args.file, args.func,
+                                  receiver_class=args.receiver_class)
         elif args.cmd == 'callees':
             out = resolve.callees(store, cfg, args.file, args.func)
+        elif args.cmd == 'defs':
+            out = resolve.defs(store, args.symbol, limit=args.limit)
         else:
             out = resolve.usages(store, cfg, args.symbol, limit=args.limit)
     finally:
         store.close()
+    freshness.attach_index(out, index_meta)
     _print_result(out, args.json)
     return 0
 

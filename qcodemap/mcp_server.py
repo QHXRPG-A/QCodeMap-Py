@@ -16,6 +16,8 @@ from qcodemap import blast as blast_mod
 from qcodemap import build as build_mod
 from qcodemap import config as config_mod
 from qcodemap import context as ctx_mod
+from qcodemap import diagnostics as diagnostics_mod
+from qcodemap import freshness as freshness_mod
 from qcodemap import pubsub_refs as pubsub_mod
 from qcodemap import resolve as rmod
 from qcodemap import rpc_refs as rpc_mod
@@ -85,63 +87,58 @@ def _tool_build(args):
 
 def _tool_callers(args):
     cfg = config_mod.load_config()
-    refresh = _refresh_if_drifted(cfg, [args['file']])
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store(cfg.db_path)
     try:
-        out = rmod.callers(store, cfg, args['file'], args['func'])
+        out = rmod.callers(store, cfg, args['file'], args['func'],
+                           receiver_class=args.get('receiver_class'))
     finally:
         store.close()
-    if refresh:
-        out['refresh'] = refresh
-    return out
+    return freshness_mod.attach_index(out, index)
 
 
 def _tool_callees(args):
     cfg = config_mod.load_config()
-    refresh = _refresh_if_drifted(cfg, [args['file']])
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store(cfg.db_path)
     try:
         out = rmod.callees(store, cfg, args['file'], args['func'])
     finally:
         store.close()
-    if refresh:
-        out['refresh'] = refresh
-    return out
+    return freshness_mod.attach_index(out, index)
 
 
 def _tool_usages(args):
     cfg = config_mod.load_config()
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store(cfg.db_path)
     try:
-        return rmod.usages(store, cfg, args['symbol'], limit=int(args.get('limit', 200)))
+        out = rmod.usages(store, cfg, args['symbol'], limit=int(args.get('limit', 200)))
     finally:
         store.close()
+    return freshness_mod.attach_index(out, index)
 
 
 def _tool_deps(args):
     cfg = config_mod.load_config()
-    refresh = _refresh_if_drifted(cfg, _scope_rels_probe(cfg, args['target']))
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store(cfg.db_path)
     try:
         out = st_mod.deps(store, args['target'], json_out=True)
     finally:
         store.close()
-    if refresh:
-        out['refresh'] = refresh
-    return out
+    return freshness_mod.attach_index(out, index)
 
 
 def _tool_importers(args):
     cfg = config_mod.load_config()
-    refresh = _refresh_if_drifted(cfg, _scope_rels_probe(cfg, args['target']))
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store(cfg.db_path)
     try:
         out = st_mod.importers(store, args['target'], json_out=True)
     finally:
         store.close()
-    if refresh:
-        out['refresh'] = refresh
-    return out
+    return freshness_mod.attach_index(out, index)
 
 
 def _scope_rels_probe(cfg, target):
@@ -155,20 +152,24 @@ def _scope_rels_probe(cfg, target):
 
 def _tool_hubs(args):
     cfg = config_mod.load_config()
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store(cfg.db_path)
     try:
-        return st_mod.hubs(store, top=int(args.get('top', 25)), json_out=True)
+        out = st_mod.hubs(store, top=int(args.get('top', 25)), json_out=True)
     finally:
         store.close()
+    return freshness_mod.attach_index(out, index)
 
 
 def _tool_tree(args):
     cfg = config_mod.load_config()
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store(cfg.db_path)
     try:
-        return st_mod.tree(store, cfg, depth=int(args.get('depth', 2)), json_out=True)
+        out = st_mod.tree(store, cfg, depth=int(args.get('depth', 2)), json_out=True)
     finally:
         store.close()
+    return freshness_mod.attach_index(out, index)
 
 
 def _tool_blast(args):
@@ -182,7 +183,10 @@ def _tool_blast(args):
         flist = blast_mod.collect_svn_status(cfg)
     else:
         flist = None
-    refresh = _refresh_if_drifted(cfg, flist)
+    diffs = old_sources = None
+    if flist is not None and not args.get('rev'):
+        diffs, old_sources = blast_mod.collect_working_diffs(cfg, flist)
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store(cfg.db_path)
     try:
         out = blast_mod.blast(store, cfg,
@@ -193,65 +197,92 @@ def _tool_blast(args):
                               section=args.get('section', 'callers'),
                               layer=int(args.get('layer', 1)),
                               offset=int(args.get('offset', 0)),
-                              limit=int(args.get('limit', 50)))
+                              limit=int(args.get('limit', 50)),
+                              diffs=diffs, old_sources=old_sources)
     finally:
         store.close()
-    if refresh:
-        out['refresh'] = refresh
-    return out
+    return freshness_mod.attach_index(out, index)
 
 
 def _tool_rpc_refs(args):
     cfg = config_mod.load_config()
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store(cfg.db_path)
     try:
-        return rpc_mod.rpc_refs(store, cfg, args['method'],
-                                stub=args.get('stub'), json_out=True)
+        out = rpc_mod.rpc_refs(store, cfg, args['method'],
+                               stub=args.get('stub'), json_out=True)
     finally:
         store.close()
+    return freshness_mod.attach_index(out, index)
 
 
 def _tool_pubsub_refs(args):
     cfg = config_mod.load_config()
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store(cfg.db_path)
     try:
-        return pubsub_mod.pubsub_refs(store, cfg, args['event'],
-                                      side=args.get('side'), json_out=True)
+        out = pubsub_mod.pubsub_refs(store, cfg, args['event'],
+                                     side=args.get('side'), json_out=True)
     finally:
         store.close()
+    return freshness_mod.attach_index(out, index)
 
 
 def _tool_find_file(args):
     cfg = config_mod.load_config()
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store(cfg.db_path)
     try:
-        return ctx_mod.find_file(store, args['pattern'],
-                                 limit=int(args.get('limit', 50)), json_out=True)
+        out = ctx_mod.find_file(store, args['pattern'],
+                                limit=int(args.get('limit', 50)), json_out=True)
     finally:
         store.close()
+    return freshness_mod.attach_index(out, index)
 
 
 def _tool_get_file_context(args):
     cfg = config_mod.load_config()
-    refresh = _refresh_if_drifted(cfg, [args['file']])
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store(cfg.db_path)
     try:
         out = ctx_mod.get_file_context(store, cfg, args['file'], json_out=True)
     finally:
         store.close()
-    if refresh:
-        out['refresh'] = refresh
-    return out
+    return freshness_mod.attach_index(out, index)
 
 
 def _tool_context(args):
     cfg = config_mod.load_config()
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store(cfg.db_path)
     try:
-        return ctx_mod.context(store, cfg, compact=bool(args.get('compact')),
-                               json_out=True)
+        out = ctx_mod.context(store, cfg, compact=bool(args.get('compact')),
+                              json_out=True)
     finally:
         store.close()
+    return freshness_mod.attach_index(out, index)
+
+
+def _tool_defs(args):
+    cfg = config_mod.load_config()
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
+    store = Store(cfg.db_path)
+    try:
+        out = rmod.defs(store, args['symbol'], limit=int(args.get('limit', 200)))
+    finally:
+        store.close()
+    return freshness_mod.attach_index(out, index)
+
+
+def _tool_diagnose(args):
+    cfg = config_mod.load_config()
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
+    store = Store(cfg.db_path)
+    try:
+        out = diagnostics_mod.diagnose(store, cfg)
+    finally:
+        store.close()
+    return freshness_mod.attach_index(out, index)
 
 
 _TOOLS = [
@@ -269,7 +300,10 @@ _TOOLS = [
         'inputSchema': {'type': 'object',
                         'properties': {'file': {'type': 'string',
                                                 'description': '函数所在文件（相对项目根）'},
-                                       'func': {'type': 'string'}},
+                                       'func': {'type': 'string'},
+                                       'receiver_class': {
+                                           'type': 'string',
+                                           'description': '限定 receiver 类型证据'}},
                         'required': ['file', 'func']},
         'handler': _tool_callers,
     },
@@ -405,6 +439,21 @@ _TOOLS = [
                         'properties': {'compact': {'type': 'boolean'}},
                         'required': []},
         'handler': _tool_context,
+    },
+    {
+        'name': 'qcodemap_defs',
+        'description': '精确查询 Python 符号定义，不混入普通出现点。',
+        'inputSchema': {'type': 'object',
+                        'properties': {'symbol': {'type': 'string'},
+                                       'limit': {'type': 'integer', 'default': 200}},
+                        'required': ['symbol']},
+        'handler': _tool_defs,
+    },
+    {
+        'name': 'qcodemap_diagnose',
+        'description': '运行 custom hook 提供的项目级诊断。',
+        'inputSchema': {'type': 'object', 'properties': {}, 'required': []},
+        'handler': _tool_diagnose,
     },
 ]
 

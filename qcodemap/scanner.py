@@ -7,17 +7,21 @@
 """
 
 import ast
+import io
+import keyword
 import re
+import tokenize
 import warnings
 
 from qcodemap.hooks import FactContext, FactsHooks
 
-TOKEN_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 # bytes 字面量行（如 data = bindict.bindict(b'\\xe4..')，表格二进制产物）：
 # 转义序列会匹配出海量伪 token，token 化前整段剔除
 _BYTES_LINE = re.compile(r"b'[^']*'|b\"[^\"]*\"")
 BUILTIN_CTORS = ('str', 'int', 'float', 'bool', 'dict', 'list', 'tuple', 'set')
 FUNC_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
+_TOP_LEVEL_STRUCTURE = re.compile(r'^(?:class |def |async def )', re.MULTILINE)
+_SEMANTIC_SKELETON_THRESHOLD = 2 * 1024 * 1024
 
 
 def read_source(path):
@@ -49,7 +53,7 @@ def dotted(node):
     return None
 
 
-def scan_file(rel, path, hooks=None, downsample=False):
+def scan_file(rel, path, hooks=None, downsample=False, profile='full'):
     """扫描单文件，返回 {表名: [完整行, ...]}；names 行为 (name, line, col)。
 
     ast 解析失败（老语法/语法错误）时仅保留 names 倒排，事实降级为空，并记
@@ -63,23 +67,21 @@ def scan_file(rel, path, hooks=None, downsample=False):
     text = read_source(path)
     r = {'names': [], 'defs': [], 'classes': [], 'imports': [],
          'attr': [], 'global_assign': [], 'ret': [], 'comp_raw': [],
-         'rpc': [], 'pubsub': [], 'callback_raw': [], 'parse_ok': True}
-    seen_names = set() if downsample else None
-    for i, line in enumerate(text.splitlines(), 1):
-        # 剔除 bytes 字面量后再 token 化（bindict 表格产物的伪 token 源）
-        line = _BYTES_LINE.sub(' ', line)
-        for m in TOKEN_RE.finditer(line):
-            tok = m.group(0)
-            if seen_names is not None:
-                if tok in seen_names:
-                    continue
-                seen_names.add(tok)
-            r['names'].append((tok, i, m.start() + 1))
+         'rpc': [], 'receiver_fact': [], 'rpc_handler': [], 'pubsub': [],
+         'callback_raw': [], 'parse_ok': True}
+    if profile == 'full':
+        r['names'] = _identifier_names(text, downsample)
+    ast_text = text
+    if profile == 'semantic-only':
+        ast_text = _BYTES_LINE.sub("b''", ast_text)
+        if (len(ast_text) >= _SEMANTIC_SKELETON_THRESHOLD
+                and not _TOP_LEVEL_STRUCTURE.search(ast_text)):
+            ast_text = _semantic_module_skeleton(ast_text)
     try:
         # 目标库老代码有非法转义序列，ast 会告警但不影响解析，压掉保持输出干净
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', SyntaxWarning)
-            tree = ast.parse(text)
+            tree = ast.parse(ast_text)
     except SyntaxError:
         r['parse_ok'] = False
         return r
@@ -98,6 +100,42 @@ def scan_file(rel, path, hooks=None, downsample=False):
                            func_imp_maps, scope_keys)
     _dedup_pubsub(r)
     return r
+
+
+def _semantic_module_skeleton(text):
+    """大型纯数据模块只保留顶层 import，其余行置空但保持行号。
+
+    core 本来就不存储模块字典值；这里避免为数十 MB 的表值
+    构建 AST，同时保留模块依赖结构和准确 import 行号。
+    """
+    out = []
+    for line in text.splitlines(True):
+        stripped = line.lstrip()
+        if len(stripped) == len(line) and stripped.startswith(('import ', 'from ')):
+            out.append(line)
+        else:
+            out.append('\n' if line.endswith(('\n', '\r')) else '')
+    return ''.join(out)
+
+
+def _identifier_names(text, downsample=False):
+    """只索引 Python tokenizer 认定的 NAME，排除字符串/注释伪命中。"""
+    out = []
+    seen = set() if downsample else None
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(text).readline)
+        for token in tokens:
+            if token.type != tokenize.NAME or keyword.iskeyword(token.string):
+                continue
+            if seen is not None:
+                if token.string in seen:
+                    continue
+                seen.add(token.string)
+            out.append((token.string, token.start[0], token.start[1] + 1))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        # 老语法/截断文件仍保留已成功 token 化的前缀。
+        pass
+    return out
 
 
 def _module_stmts(tree):
@@ -361,7 +399,10 @@ def _scan_function(fn, r, rel, mod, cls, hooks, imp_map=None,
                 if t not in BUILTIN_CTORS:
                     r['ret'].append((mod, func_key, t, rel))
         return
-    fctx = FactContext(rel, mod, cls, fn.name, imp_map)
+    fctx = FactContext(rel, mod, cls, fn.name, imp_map, fn)
+    for chan, method, endpoint, confidence, reason in hooks.handler_facts(fn, fctx):
+        r['rpc_handler'].append(
+            (rel, fn.lineno, chan, method, endpoint, confidence, reason))
     for node in _walk_function_scope(fn):
         if isinstance(node, ast.Return) and isinstance(node.value, ast.Call) \
                 and isinstance(node.value.func, ast.Name):
@@ -371,6 +412,9 @@ def _scan_function(fn, r, rel, mod, cls, hooks, imp_map=None,
         elif isinstance(node, ast.Call):
             for (chan, method, stub) in hooks.rpc_facts(node, fctx):
                 r['rpc'].append((rel, node.lineno, chan, method, stub))
+            for expr, typ, confidence, reason in hooks.receiver_type_facts(node, fctx):
+                r['receiver_fact'].append(
+                    (rel, node.lineno, expr, typ, confidence, reason))
             for (side, event) in hooks.pubsub_facts(node, fctx):
                 r['pubsub'].append((rel, node.lineno, side, event, fn.name, cls))
     for nested in _direct_nested_functions(fn):

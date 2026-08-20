@@ -7,13 +7,32 @@
 """
 
 import ast
+import concurrent.futures
 import fnmatch
+import json
 import os
 import sqlite3
+import sys
 import time
 
+from qcodemap.fingerprint import analysis_fingerprint
 from qcodemap import scanner
 from qcodemap.store import Store
+
+_WORKER_HOOKS = None
+
+
+def _init_scan_worker(custom_dir):
+    global _WORKER_HOOKS
+    from qcodemap.config import load_config
+    _WORKER_HOOKS = load_config(custom_dir=custom_dir).hooks
+
+
+def _scan_worker(job):
+    rel, path, mtime, downsample, profile = job
+    rows = scanner.scan_file(rel, path, _WORKER_HOOKS,
+                             downsample=downsample, profile=profile)
+    return rel, mtime, profile, rows
 
 
 def _excluded_dirs(dirnames, exclude_dirs):
@@ -89,7 +108,7 @@ def collect_files(cfg):
 
 _ALL_TABLES = ('meta', 'files', 'names', 'defs', 'classes', 'imports', 'attr',
                'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'pubsub',
-               'callback_raw', 'edges')
+               'receiver_fact', 'rpc_handler', 'callback_raw', 'edges')
 
 
 def _prepare_rebuild(db_path):
@@ -97,73 +116,183 @@ def _prepare_rebuild(db_path):
     的 DDL 按当前 schema 重建——绕开初始化期版本校验的同时保证表结构更新。
     """
     con = sqlite3.connect(db_path)
+    corrupt = False
     try:
         for table in _ALL_TABLES:
             con.execute('DROP TABLE IF EXISTS %s' % table)
         con.commit()
+    except sqlite3.OperationalError as exc:
+        if 'locked' in str(exc).lower():
+            raise RuntimeError('索引库正在被查询进程占用，请稍后重试 rebuild') from exc
+        corrupt = True
     except sqlite3.DatabaseError:
-        pass  # 库文件不存在/损坏：Store 会按新库处理
+        corrupt = True
     finally:
-        con.close()
+        try:
+            con.close()
+        except sqlite3.DatabaseError:
+            corrupt = True
+    if corrupt:
+        # 索引库是可再生缓存；rebuild 已明确授权丢弃旧库。
+        for path in (db_path, db_path + '-journal', db_path + '-wal', db_path + '-shm'):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
 
 
-def build(cfg, rebuild=False, verbose=True):
+def _profile_for(cfg, rel):
+    for pattern, profile in getattr(cfg, 'index_profile_rules', ()):
+        if fnmatch.fnmatch(rel, pattern):
+            if profile not in ('full', 'semantic-only'):
+                raise ValueError('未知索引 profile: %s (%s)' % (profile, pattern))
+            return profile
+    return 'full'
+
+
+def _in_selected_scope(cfg, rel):
+    return any(rel == t or rel.startswith(t.rstrip('/') + '/')
+               for t in cfg.targets) or _included(rel, cfg.include_paths)
+
+
+def build(cfg, rebuild=False, verbose=True, scope_rels=None, vacuum=False):
     """执行（增量）建库，返回统计 dict。rebuild 先清 meta 再建库，
     保证 schema 版本校验（Store 初始化期）不会拦下重建请求。"""
     t0 = time.time()
+    stages = {}
+    last_progress = [t0]
+
+    def progress(phase, current=None, total=None, force=False):
+        now = time.time()
+        if not verbose or (not force and now - last_progress[0] < 5):
+            return
+        suffix = '' if current is None else ' %d/%d' % (current, total)
+        sys.stderr.write('[qcodemap] %s%s  %.1fs\n' % (phase, suffix, now - t0))
+        sys.stderr.flush()
+        last_progress[0] = now
+
     if rebuild:
         _prepare_rebuild(cfg.db_path)
     store = Store(cfg.db_path)
     try:
+        previous_fingerprint = store.get_meta('analysis_fingerprint')
+        previous_coverage = store.get_meta('coverage_status')
+        if (getattr(cfg, 'targets_overridden', False) and not rebuild
+                and previous_fingerprint is None):
+            raise RuntimeError(
+                '无完整基库时 build --targets 不会默认建子集库；'
+                '请先完整 build，或显式使用 --rebuild --targets')
         if rebuild:
             _drop_all(store)
+        phase_t0 = time.time()
         disk = collect_files(cfg)
+        stages['collect'] = round(time.time() - phase_t0, 3)
+        progress('collect', len(disk), len(disk), force=True)
         known = store.all_files()
+        if scope_rels is not None:
+            active = {r.replace('\\', '/') for r in scope_rels}
+            disk = {rel: mt for rel, mt in disk.items() if rel in active}
+            delete_scope = active
+        elif getattr(cfg, 'targets_overridden', False) and not rebuild:
+            delete_scope = {rel for rel in known if _in_selected_scope(cfg, rel)}
+        else:
+            delete_scope = set(known)
         n_new = n_upd = n_del = 0
-        for rel in sorted(known):
+        for rel in sorted(delete_scope):
             if rel not in disk:
                 store.remove_file(rel)
                 n_del += 1
-        for rel in sorted(disk):
+        phase_t0 = time.time()
+        scan_rels = sorted(disk)
+        scan_jobs = []
+        for rel in scan_rels:
             mtime = disk[rel]
             old = known.get(rel)
-            if old is not None and old[1] == mtime:
+            profile = _profile_for(cfg, rel)
+            old_profile_row = store.con.execute(
+                'SELECT profile FROM files WHERE path=?', (rel,)).fetchone()
+            old_profile = old_profile_row[0] if old_profile_row else None
+            if old is not None and old[1] == mtime and old_profile == profile:
                 continue
             if old is not None:
                 store.remove_file(rel)
                 n_upd += 1
             else:
                 n_new += 1
-            rows = scanner.scan_file(
-                rel, os.path.join(cfg.root, rel.replace('/', os.sep)), cfg.hooks,
-                downsample=any(rel.startswith(p) for p in cfg.names_downsample))
+            scan_jobs.append((
+                rel, os.path.join(cfg.root, rel.replace('/', os.sep)), mtime,
+                any(rel.startswith(p) for p in cfg.names_downsample), profile))
+
+        def insert_result(index, result):
+            rel, mtime, profile, rows = result
             fid = store.insert_file(rel, mtime,
-                                    parse_ok=bool(rows.get('parse_ok', True)))
+                                    parse_ok=bool(rows.get('parse_ok', True)),
+                                    profile=profile)
             store.insert_rows(fid, rows)
+            progress('scan', index, len(scan_jobs))
+
+        if len(scan_jobs) > 100 and getattr(cfg, 'custom_dir', None):
+            workers = min(4, max(2, os.cpu_count() or 2))
+            with concurrent.futures.ProcessPoolExecutor(
+                    max_workers=workers, initializer=_init_scan_worker,
+                    initargs=(cfg.custom_dir,)) as executor:
+                results = executor.map(_scan_worker, scan_jobs, chunksize=4)
+                for index, result in enumerate(results, 1):
+                    insert_result(index, result)
+        else:
+            for index, job in enumerate(scan_jobs, 1):
+                rel, path, mtime, downsample, profile = job
+                rows = scanner.scan_file(
+                    rel, path, cfg.hooks, downsample=downsample, profile=profile)
+                insert_result(index, (rel, mtime, profile, rows))
+        stages['scan'] = round(time.time() - phase_t0, 3)
         n_raw = store.count('comp_raw')
+        phase_t0 = time.time()
         if n_new or n_upd or n_del:
             store.con.execute('DELETE FROM comp')
             for row in _resolve_comps(store, cfg):
                 store.con.execute('INSERT INTO comp VALUES(?,?,?,?)', row)
+        stages['pass2'] = round(time.time() - phase_t0, 3)
+        progress('pass2', force=True)
         store.set_meta('built_at', str(int(time.time())))
         store.set_meta('root', cfg.root)
+        if getattr(cfg, 'targets_overridden', False) and not rebuild:
+            store.set_meta('analysis_fingerprint', previous_fingerprint)
+            store.set_meta('coverage_status', previous_coverage or 'complete')
+        else:
+            store.set_meta('analysis_fingerprint', analysis_fingerprint(cfg))
+            coverage_status = ('targeted' if getattr(cfg, 'targets_overridden', False)
+                               else 'complete')
+            store.set_meta('coverage_status', coverage_status)
+            store.set_meta('targets_json', json.dumps(cfg.targets, ensure_ascii=False))
+        phase_t0 = time.time()
+        store.commit()
+        stages['commit'] = round(time.time() - phase_t0, 3)
+        progress('commit', force=True)
+        do_vacuum = rebuild or vacuum
+        if do_vacuum:
+            phase_t0 = time.time()
+            store.con.execute('VACUUM')
+            stages['vacuum'] = round(time.time() - phase_t0, 3)
+            progress('vacuum', force=True)
+        else:
+            stages['vacuum'] = 0.0
         stats = {
-            'files': len(disk), 'new': n_new, 'updated': n_upd, 'deleted': n_del,
+            'files': store.count('files'), 'new': n_new, 'updated': n_upd, 'deleted': n_del,
             'comp_raw': n_raw, 'comp': store.count('comp'),
             'callback_raw': store.count('callback_raw'),
             'names': store.count('names'), 'parse_failed': store.parse_failed_count(),
+            'stages': stages, 'vacuumed': do_vacuum,
             'elapsed': round(time.time() - t0, 1),
         }
-        store.commit()
         if verbose:
-            print('build 完成: %d 文件 (+%d ~%d -%d) names=%d 组件边=%d/%d '
-                  'ast失败=%d  %.1fs'
-                  % (stats['files'], n_new, n_upd, n_del,
-                     stats['names'], stats['comp'], stats['comp_raw'],
-                     stats['parse_failed'], stats['elapsed']))
-        # rebuild/大删改后回收空闲页（SQLite 删除不还给 OS，1.5GB 虚胖->440MB 实测）
-        if rebuild or n_del > 100:
-            store.con.execute('VACUUM')
+            sys.stderr.write(
+                'build 完成: %d 文件 (+%d ~%d -%d) names=%d 组件边=%d/%d '
+                'ast失败=%d  %.1fs\n'
+                % (stats['files'], n_new, n_upd, n_del,
+                   stats['names'], stats['comp'], stats['comp_raw'],
+                   stats['parse_failed'], stats['elapsed']))
+            sys.stderr.flush()
         return stats
     finally:
         store.close()
@@ -172,7 +301,7 @@ def build(cfg, rebuild=False, verbose=True):
 def _drop_all(store):
     for table in ('files', 'names', 'defs', 'classes', 'imports', 'attr',
                   'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'pubsub',
-                  'callback_raw', 'edges'):
+                  'receiver_fact', 'rpc_handler', 'callback_raw', 'edges'):
         store.con.execute('DELETE FROM %s' % table)
 
 
@@ -200,6 +329,8 @@ def drift_check(store, cfg, rels, cap=DRIFT_CHECK_CAP):
         try:
             disk = os.path.getmtime(os.path.join(cfg.root, rel.replace('/', os.sep)))
         except OSError:
+            if rel in known:
+                out.append(rel)
             continue
         old = known.get(rel)
         if old is None or disk != old[1]:

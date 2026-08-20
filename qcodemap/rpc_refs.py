@@ -2,9 +2,8 @@
 """rpc-refs：字符串分发 RPC 的双端配对查询（P3-2）。
 
 rpc 表存调用点事实（file/line/chan/method/stub，来自 custom 钩子提取）；
-handler 侧就是普通 def（不依赖 @rpc_method 装饰器），按 defs 表配对：
-stub 已知时优先 class==stub 的定义，其余同名定义列为候选。
-输出分级：RPC-INFERRED（推断调用点，非语义验证）/ HANDLER（定义）。
+handler 侧优先消费 custom 产出的装饰器/方向事实；其余同名 def
+仅作 NAME-ONLY 兜底，不伪装成精确配对。
 """
 
 import time
@@ -37,26 +36,37 @@ def rpc_refs(store, cfg, method, stub=None, json_out=True):
         items.append({'level': 'RPC-INFERRED', 'chan': chan,
                       'stub': rstub, 'file': f, 'line': ln,
                       'caller': rmod._display(cls, fname)})
+    call_chans = {i['chan'] for i in items if i['level'] == 'RPC-INFERRED'}
+    handler_rows = store.con.execute(
+        'SELECT file,line,chan,endpoint,confidence,reason FROM rpc_handler '
+        'WHERE method=? ORDER BY file,line', (method,)).fetchall()
+    handler_locations = set()
+    for f, ln, chan, endpoint, confidence, reason in handler_rows:
+        endpoint_match = not stub or endpoint == stub
+        direction_match = not call_chans or chan in call_chans \
+            or (chan == 'SERVER' and 'STUB' in call_chans)
+        if not endpoint_match or not direction_match:
+            continue
+        level = ('HANDLER-VERIFIED' if confidence == 'verified'
+                 else 'HANDLER-INFERRED')
+        items.append({
+            'level': level, 'chan': chan, 'stub': endpoint,
+            'file': f, 'line': ln,
+            'caller': '%s.%s' % (endpoint, method) if endpoint else method,
+            'match': 'direction+endpoint' if stub else 'direction',
+            'note': reason,
+        })
+        handler_locations.add((f, ln))
     defs = store.con.execute(
         'SELECT file, line, class FROM defs WHERE name=? ORDER BY file, line',
         (method,)).fetchall()
-    n_handler = 0
     for (f, ln, dcls) in defs:
-        if stub and dcls == stub:
-            items.append({'level': 'HANDLER', 'stub': dcls, 'file': f,
-                          'line': ln, 'caller': '%s.%s' % (dcls, method)
-                          if dcls else method, 'match': 'stub'})
-            n_handler += 1
-        elif stub:
-            items.append({'level': 'HANDLER', 'stub': dcls, 'file': f,
-                          'line': ln,
-                          'caller': '%s.%s' % (dcls, method) if dcls else method,
-                          'match': 'name-only'})
-        else:
-            items.append({'level': 'HANDLER', 'stub': dcls, 'file': f,
-                          'line': ln,
-                          'caller': '%s.%s' % (dcls, method) if dcls else method})
-            n_handler += 1
+        if (f, ln) in handler_locations:
+            continue
+        items.append({'level': 'NAME-ONLY', 'stub': dcls, 'file': f,
+                      'line': ln,
+                      'caller': '%s.%s' % (dcls, method) if dcls else method,
+                      'match': 'name-only'})
     # 调用点落在 ast 失败文件的场景（如 cimp_replay.py 的 CallServerNew）
     # 只索引 names 不产 rpc 行——note 提示走 usages 补漏
     note = ''
@@ -66,12 +76,13 @@ def rpc_refs(store, cfg, method, stub=None, json_out=True):
                 '不在结果内，可用 usages %s 补查' % (len(bad), method))
     items.sort(key=lambda i: (i['level'], i['file'], i['line']))
     out = {
-        'schema_version': 'qcodemap.rpc/v1',
+        'schema_version': 'qcodemap.rpc/v2',
         'method': method, 'stub': stub,
         'channels': _chan_names(cfg),
         'items': items,
         'n_rpc': sum(1 for i in items if i['level'] == 'RPC-INFERRED'),
-        'n_handler': sum(1 for i in items if i['level'] == 'HANDLER'),
+        'n_handler': sum(1 for i in items if i['level'].startswith('HANDLER-')),
+        'n_name_only': sum(1 for i in items if i['level'] == 'NAME-ONLY'),
         'note': note,
         'coverage': {'status': 'partial' if bad else 'complete',
                      'parse_failed': len(bad)},
