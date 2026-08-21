@@ -58,7 +58,7 @@ def collect_files(cfg):
 
     排除规则：INCLUDE_PATHS 命中的路径（含子树）优先放行，跳过目录名/文件名
     排除；其余按 EXCLUDE_DIRS（任意层级目录名）与 EXCLUDE_FILES 过滤。
-    include 路径可能不在 TARGETS 覆盖范围内（如 engine_dev/），单独补扫。
+    include 路径可能不在 TARGETS 覆盖范围内，单独补扫。
     """
     root = cfg.root
     out = {}
@@ -69,7 +69,7 @@ def collect_files(cfg):
                    for t in (cfg.targets or [])):
             bases.append(os.path.join(root, p))
     for base in bases:
-        if os.path.isfile(base):  # 单文件 include（如 classutils.py）
+        if os.path.isfile(base):  # 单文件 include（TARGETS 外的散置文件）
             rel = os.path.relpath(base, root).replace('\\', '/')
             try:
                 out[rel] = os.path.getmtime(base)
@@ -268,14 +268,17 @@ def build(cfg, rebuild=False, verbose=True, scope_rels=None, vacuum=False):
             store.set_meta('targets_json', json.dumps(cfg.targets, ensure_ascii=False))
         # build 收尾钩子：custom 顺带刷新引擎管线外的资源索引（默认无操作）
         phase_t0 = time.time()
-        try:
-            cfg.hooks.build_done(store, cfg, stages)
-        except Exception as exc:  # 资源索引失败不阻断主库产出
-            sys.stderr.write('[qcodemap] build_done hook failed: %r\n' % (exc,))
-            sys.stderr.flush()
-            stages['build_done'] = 'failed: %r' % (exc,)
+        if cfg.hooks is None:
+            stages['build_done'] = 'skipped: no custom hooks'
         else:
-            stages['build_done'] = round(time.time() - phase_t0, 3)
+            try:
+                cfg.hooks.build_done(store, cfg, stages)
+            except Exception as exc:  # 资源索引失败不阻断主库产出
+                sys.stderr.write('[qcodemap] build_done hook failed: %r\n' % (exc,))
+                sys.stderr.flush()
+                stages['build_done'] = 'failed: %r' % (exc,)
+            else:
+                stages['build_done'] = round(time.time() - phase_t0, 3)
         phase_t0 = time.time()
         store.commit()
         stages['commit'] = round(time.time() - phase_t0, 3)
@@ -353,7 +356,7 @@ def drift_check(store, cfg, rels, cap=DRIFT_CHECK_CAP):
 # ---- pass2: comp_raw -> comp ----
 
 def _resolve_comps(store, cfg):
-    """@Components 原始行 -> (host, host_file, comp_class, comp_file) 集合。
+    """组件注入原始行 -> (host, host_file, comp_class, comp_file) 集合。
 
     ref:  同文件类或 import 名字指向的模块；
     attr: mod.Cls 形态，按 import 前缀定位文件；

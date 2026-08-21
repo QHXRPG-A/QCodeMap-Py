@@ -6,11 +6,12 @@
 ## 1. 总体数据流
 
 ```
-建库（一次性 207s / 增量亚秒）
+建库（一次性全量分钟级，随库规模与机器负载波动；增量亚秒）
   collect_files（build.py，磁盘遍历 + include/exclude 规则）
     → scan_file（scanner.py，单文件 ast 扫描 + custom 钩子事实）
     → store.py 落 SQLite（cache/qcodemap.db）
-    → pass2（build.py _resolve_comps：@Components 三形态 → comp 边）
+    → pass2（build.py _resolve_comps：组件注入三形态 → comp 边）
+    → build_done 钩子（custom 自管资源库刷新，如 ui-refs 的 tbui 索引）
     → rebuild/大删改后 VACUUM（SQLite 删除不还页，防库虚胖）
 
 查询（两阶段）
@@ -38,26 +39,29 @@
 | `blast.py` | 变更影响面：变更集采集 + 调用链闭包 + 输出投影 | 完整计算后提供 summary/page/full；caller 按 layer、importers 独立分页 |
 | `rpc_refs.py` | RPC 双端配对查询：rpc 表调用点 + defs 表 handler | RPC-INFERRED/HANDLER 分级；stub 精确配对优先，方法名兜底 |
 | `pubsub_refs.py` | 事件双端配对查询：pubsub 表两侧事实 | EVENT-INFERRED/LISTENER 分级；裸事件名按后缀匹配分组（防跨端撞名） |
+| `ui_refs.py` | UI 资源绑定双向查询：ui_binding 事实 × custom 资源库三步配对 | EXACT/MULTI/MISS/INDIRECT/UNBOUND/PATTERN/DYNAMIC 分级；audit 输出存量债与改名安全报告 |
 | `context.py` | agent 消费面三命令：find_file / get_file_context / context | 全查表无 ast 现扫；context 为一次性项目档案（qcodemap.context/v1） |
 | `freshness.py` | 查询前新鲜度契约 | auto/check/off；全仓文件集+mtime 增量刷新；配置/schema/hook 指纹不匹配拒绝旧结果 |
+| `fingerprint.py` | 索引指纹：custom 目录全部 .py 内容 + 配置/profile 哈希 | custom 词表改动即失效旧库，防用旧语义回答新问题 |
 | `diagnostics.py` | custom 项目诊断汇总 | 核心只聚合统一诊断事实，不识别项目框架 |
-| `mcp_server.py` | stdio JSON-RPC MCP server（16 工具） | 自举 UTF-8；日志一律 stderr；全查询 auto refresh，进程内 1 秒节流 |
-| `custom/` | 项目定制层（config/facts/seeds 三件，仓库仅随附模板说明） | 见 CUSTOM_GUIDE |
+| `mcp_server.py` | stdio JSON-RPC MCP server（17 工具） | 自举 UTF-8；日志一律 stderr；全查询 auto refresh，进程内 1 秒节流；ui-refs 工具描述由 custom profile 注入 |
+| `custom/` | 项目定制层（config/facts/seeds/ui_profile/tbui_index 五件，仓库仅随附模板说明） | 见 CUSTOM_GUIDE |
 
 ## 3. 表结构（store.DDL）
 
 | 表 | 内容 | 规模 |
 | --- | --- | --- |
-| `files` | id / path / mtime / profile / parse_ok，增量与级联删除的锚点 | 8950 |
+| `files` | id / path / mtime / profile / parse_ok，增量与级联删除的锚点 | 8994 |
 | `names` | 标识符倒排（name, file_id, line, col）；semantic-only 不写入 | ~353 万 |
 | `defs` / `classes` | 函数/类定义（file, line, class, name；类含 bases 逗号串） | 数万 |
 | `imports` | (file, module, name, alias, line, scope)，相对导入归一；结构图消费全部作用域 | ~30 万 |
 | `attr` | 属性类型事实：Property 声明（含第二参数类型）+ self.X=构造 | 数万 |
 | `global_assign` | 运行时全局注入：genv.X = self → (base, attr, class) | 数百 |
 | `ret` | 返回类型事实：return 构造()（module/class.method 两个命名空间） | 数千 |
-| `comp_raw` / `comp` | @Components 原始行 / 精确 (host,host_file)↔(comp,comp_file) 边 | 3659/3881 |
+| `comp_raw` / `comp` | 组件注入原始行 / 精确 (host,host_file)↔(comp,comp_file) 边 | 3739/3962 |
 | `rpc` | 字符串分发 RPC 调用点：(file, line, chan, method, stub)，stub 可 NULL | 数千（见附录 F） |
 | `pubsub` | 事件分发两侧事实：(file, line, side, event, func, cls)，event 是 import 归一的常量键 | 数千（见附录 G） |
+| `ui_binding` | custom 声明的资源绑定事实：(file,line,class,kind,key,receiver,wrapper,...)，kind 对 core 不透明 | 5.7 万（SEEK 族为主） |
 | `callback_raw` | custom 声明的通用约定回调：(file,line,class,kind,source,target) | 数千 |
 | `receiver_fact` | custom 提供的调用点 receiver 类型证据 | 按项目规则增长 |
 | `rpc_handler` | custom 提供的 RPC handler、方向、端点与证据等级 | 按项目规则增长 |
@@ -99,7 +103,7 @@
 本身就是信息（如 HasSkywingForPara 基类版/子类重写版的区分）。
 
 ### 5.4 RESOLVER_VERSION 缓存失效
-edges 缓存键含解析器行为版本（resolve.py 顶部常量）。任何影响边判定结果的
+edges 缓存键含解析器行为版本（resolve.py 内 RESOLVER_VERSION 常量）。任何影响边判定结果的
 改动（消歧规则、递归防线、新的推导路径）必须 +1，否则旧结论污染新查询。
 历史教训：修了镜像类消歧后旧缓存仍命中，VERIFIED 停在错误值。
 
@@ -129,7 +133,7 @@ structure 按 scope（deps/importers 的目标集）给 partial 并附 issues �
 只增量刷新新增、修改、删除文件，check 只报告漂移，off 明确接受旧库。
 MCP 的 auto 检查进程内节流 1 秒。schema、配置、profile 或 custom hook
 指纹不匹配时拒绝返回旧结果，不在查询路径静默触发完整重建。JSON 统一返回
-`index` 元数据。本项目约 8950 文件的新鲜度扫描实测 0.61 秒。
+`index` 元数据。本项目约 9000 文件的新鲜度扫描实测 0.61 秒。
 
 ### 5.9 RPC 双端配对（P3-2：字符串分发的约定边）
 孵化案例的 RPC 全部是字符串分发（`CallServer('X', ...)` / `CallClient` /
@@ -203,10 +207,13 @@ CLI 默认 full 保持旧行为；MCP 默认 summary。page 模式以 callers/im
 | `test_scale.py` | 全库规模/查询/缓存指标，文件数 ±1% 容差 | 增量秒级（--rebuild 全量） |
 | `test_structure.py` | 四命令输出正确性 + hubs 锚点方向 | ~1s |
 | `test_blast.py` | 闭包命中已知边（--files 模式，不依赖 svn） | 秒级（缓存热后） |
-| `test_mcp.py` | 进程内协议全流程（16 工具）+ 真子进程冒烟 | ~10s |
+| `test_mcp.py` | 进程内协议全流程（17 工具）+ 真子进程冒烟 | ~10s |
 | `test_p4.py` | 覆盖率契约 + 三新命令 + 懒刷新（临时小库自建） | ~2s |
 | `test_rpc.py` | RPC 分发提取 + rpc-refs 配对 + blast 穿透（临时小库） | ~2s |
 | `test_pubsub.py` | pubsub 双端提取 + 事件归一 join + blast 穿透（临时小库） | ~2s |
+| `test_callback.py` | 通用约定回调 + custom 规则 + 严格宿主验证 + blast | ~2s |
+| `test_local_imports.py` | 局部 import 结构边 + 词法隔离 + custom 事件归一 | ~1s |
+| `test_ui_refs.py` | ui_facts 提取 + tbui 展开 + 三视图配对 + audit（真实 custom 词表小样） | ~10s |
 | `test_p5.py` | partial targets、新鲜度、指纹、profile、receiver、RPC、诊断、UTF-8、blast hunk | ~6s |
 
 动任何 qcodemap/ 代码后全部回归都跑；只动 custom/ 至少跑 feasibility、scale、p5。

@@ -256,10 +256,11 @@ blast-radius 评估影响面、file-context 打包单文件、context 生成开�
 
 ```
 qcodemap/     核心引擎（与项目无关）：cli / build / scanner / store / resolve /
-              structure / blast / context / rpc_refs / pubsub_refs /
-              mcp_server / hooks / config / defaults
+              structure / blast / context / rpc_refs / pubsub_refs / ui_refs /
+              freshness / fingerprint / mcp_server / hooks / config / defaults
 custom/       项目定制层：config.py（范围）/ facts.py（框架写法钩子）/
-              seeds.py（人工种子）。仓库只随附 README.md 模板
+              seeds.py（人工种子）/ ui_profile.py + tbui_index.py（ui-refs
+              词汇与资源格式）。仓库只随附 README.md 模板
 skill/        内置 qcodemap-agent 上手 skill：仓库导航与脱敏 custom 适配指南
 tests/        自包含回归套件（test_p4/test_p5 自建临时库）；锚定试点代码库的回归与
               custom/ 项目档案留在本地工作区，不入公开仓库

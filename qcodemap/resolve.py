@@ -5,7 +5,7 @@
 - VERIFIED：解析链路（MRO/组件/数据流/返回事实）落到目标定义；
 - CANDIDATE：调用形态成立但解析不可达或同名歧义，只列位置不下结论。
 
-全局对象（genv 等）不硬编码：凡在 global_assign 表登记过 (base, attr) 的
+全局对象不硬编码：凡在 global_assign 表登记过 (base, attr) 的
 名字都视为运行时全局，类型查表还原。
 """
 
@@ -107,10 +107,10 @@ class Resolver(object):
         return self.ret_seeds.get(key) or self.ret_facts.get(key)
 
     def mro_has_method(self, cls, cls_file, method, seen=None):
-        """沿 bases + @Components 组件类找方法定义，返回 (file, line) 或 None。
+        """沿 bases + 组件边（comp_raw）找方法定义，返回 (file, line) 或 None。
 
         同名多定义类（多文件组件 mixin 等）按并集语义查全部定义文件：
-        @Components 是 setattr 拷贝，宿主方法来自每一个组件类。
+        组件注入是 setattr 拷贝，宿主方法来自每一个组件类。
         """
         seen = seen or set()
         if (cls, cls_file) in seen:
@@ -387,7 +387,7 @@ class Resolver(object):
         return best
 
     def _resolve_global_pseudo(self, typ):
-        """'genv.X' 伪类型 -> global_assign 还原的真实类名。"""
+        """'gw.X' 形全局伪类型 -> global_assign 还原的真实类名。"""
         base, attr = typ.split('.', 1)
         return self.global_types.get(base, {}).get(attr)
 

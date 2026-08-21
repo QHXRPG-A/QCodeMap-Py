@@ -20,10 +20,11 @@ PROJECT_DIR = PKG_DIR.parent
 # custom/config.py 里可出现的配置键（大小写敏感）
 KNOWN_KEYS = ('ROOT', 'TARGETS', 'EXCLUDE_DIRS', 'EXCLUDE_FILES',
               'INCLUDE_PATHS', 'NAMES_DOWNSAMPLE_PREFIXES', 'DB_PATH',
-              'RPC_CHANNELS', 'INDEX_PROFILE_RULES',
-              # 资源绑定查询（ui-refs）：外部资源根与自管索引库，值对 core
-              # 不透明，由 custom 的 build_done / 查询模块消费；缺省不启用
-              'UI_TBUI_ROOT', 'UI_CSB_ROOT', 'UI_INDEX_DB')
+              'RPC_CHANNELS', 'RPC_CHAN_ALIASES', 'INDEX_PROFILE_RULES',
+              # 资源绑定查询（ui-refs）：外部资源根与自管索引库，键值对
+              # core 均不透明（语义由 custom 的 build_done / 查询模块定义），
+              # 缺省不启用
+              'UI_RES_ROOT', 'UI_RES_ARTIFACT_ROOT', 'UI_INDEX_DB')
 
 
 class Config(object):
@@ -40,9 +41,10 @@ class Config(object):
         self.ret_seeds = {}
         self.attr_seeds = {}
         self.rpc_channels = {}  # 通道代码 -> 显示名（rpc-refs 输出用）
+        self.rpc_chan_aliases = {}  # 通道代码 -> 等价调用通道元组（配对判定用）
         self.index_profile_rules = []  # [(glob, full|semantic-only), ...]
-        self.ui_tbui_root = ''   # 外部 tbui 资源根（ui-refs；空 = 不启用）
-        self.ui_csb_root = ''    # 外部 csb 包内产物根（漂移标注用）
+        self.ui_res_root = ''        # 外部资源树根（ui-refs；空 = 不启用）
+        self.ui_res_artifact_root = ''  # 外部打包产物根（漂移标注用）
         self.ui_index_db = ''    # 资源自管索引库路径（空 = 用主库同目录 qcodemap_ui.db）
         self.ui_profile = None   # custom/ui_profile.py 的 Profile 实例；None=降级
         self.targets_overridden = False
@@ -83,14 +85,16 @@ def _apply_custom_config(cfg, mod):
             cfg.names_downsample = [str(p).replace('\\', '/') for p in (val or ())]
         elif key == 'RPC_CHANNELS':
             cfg.rpc_channels = dict(val or {})
+        elif key == 'RPC_CHAN_ALIASES':
+            cfg.rpc_chan_aliases = {k: tuple(v) for k, v in (val or {}).items()}
         elif key == 'INDEX_PROFILE_RULES':
             cfg.index_profile_rules = [tuple(item) for item in (val or ())]
         elif key == 'DB_PATH':
             cfg.db_path = str(val)
-        elif key == 'UI_TBUI_ROOT':
-            cfg.ui_tbui_root = str(val)
-        elif key == 'UI_CSB_ROOT':
-            cfg.ui_csb_root = str(val)
+        elif key == 'UI_RES_ROOT':
+            cfg.ui_res_root = str(val)
+        elif key == 'UI_RES_ARTIFACT_ROOT':
+            cfg.ui_res_artifact_root = str(val)
         elif key == 'UI_INDEX_DB':
             cfg.ui_index_db = str(val)
 

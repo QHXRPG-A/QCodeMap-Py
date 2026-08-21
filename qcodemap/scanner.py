@@ -2,7 +2,7 @@
 """单文件 ast 扫描：names 倒排 + defs/classes/imports + 事实原始行。
 
 通用事实（项目无关）：self.X = 构造() -> attr；return 构造() -> ret。
-框架事实（Property 声明、@Components、genv 注入等）：经 hooks 产出，
+框架事实（声明式属性、组件注入装饰器、运行时全局注入等）：经 hooks 产出，
 本模块只负责按协议调用与登记，不认识任何框架名字。
 """
 
@@ -15,7 +15,7 @@ import warnings
 
 from qcodemap.hooks import FactContext, FactsHooks
 
-# bytes 字面量行（如 data = bindict.bindict(b'\\xe4..')，表格二进制产物）：
+# bytes 字面量行（如 data = load_blob(b'\\xe4..')，二进制产物行）：
 # 转义序列会匹配出海量伪 token，token 化前整段剔除
 _BYTES_LINE = re.compile(r"b'[^']*'|b\"[^\"]*\"")
 BUILTIN_CTORS = ('str', 'int', 'float', 'bool', 'dict', 'list', 'tuple', 'set')
@@ -393,7 +393,7 @@ def _walk_no_nested_class(cd):
 
 
 def _scan_self_assign(st, r, rel, cctx, hooks):
-    """self.X = <值> -> attr 事实；值类型先问钩子（genv.Y 等），再通用构造规则。"""
+    """self.X = <值> -> attr 事实；值类型先问钩子（全局伪类型等），再通用构造规则。"""
     for tgt in st.targets:
         if not (isinstance(tgt, ast.Attribute) and isinstance(tgt.value, ast.Name)
                 and tgt.value.id == 'self'):

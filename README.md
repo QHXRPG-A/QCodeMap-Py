@@ -295,10 +295,12 @@ framework.
 
 ```text
 qcodemap/     Project-agnostic core: cli / build / scanner / store / resolve /
-              structure / blast / context / rpc_refs / pubsub_refs /
-              mcp_server / hooks / config / defaults
+              structure / blast / context / rpc_refs / pubsub_refs / ui_refs /
+              freshness / fingerprint / mcp_server / hooks / config / defaults
 custom/       Project layer: config.py (scope) / facts.py (framework hooks) /
-              seeds.py (manual facts). The repository ships README.md only.
+              seeds.py (manual facts) / ui_profile.py + tbui_index.py
+              (ui-refs vocabulary and resource format). The repository ships
+              README.md only.
 skill/        Bundled qcodemap-agent onboarding skill for repository navigation
               and sanitized custom integration guidance.
 tests/        Self-contained regressions (test_p4/test_p5 create temporary

@@ -7,7 +7,7 @@
   行结构必须与 store 对应表的列一致（见 store.DDL）；rpc/pubsub/callback
   钩子返回裸元组，rel/line 等定位列由 scanner 补齐；
 - 伪类型名中含 '.' 且前段是已知全局对象名时，视为运行时全局引用
-  （如 'genv.space'），由 resolver 查 global_assign(base, attr) 还原类型，
+  （如 'gw.space'），由 resolver 查 global_assign(base, attr) 还原类型，
   core 不硬编码任何具体全局名——哪些名字算全局对象由提取器自己决定。
 """
 
@@ -19,7 +19,7 @@ class FactContext(object):
 
     func/imports 仅函数级钩子（rpc_facts/pubsub_facts）有值：func=所在函数名，
     imports=本文件模块级 import 预扫映射 {本地名: 目标点分路径}，供框架侧
-    把 events.X 这类引用归一成可 join 的完整常量键。
+    把 evt_mod.X 这类引用归一成可 join 的完整常量键。
     """
 
     __slots__ = ('rel', 'mod', 'cls', 'func', 'imports', 'function_node')
@@ -40,21 +40,22 @@ class FactsHooks(object):
         """Assign 赋值语句 -> 伪类型名或 None。
 
         node 是 ast.Assign；返回 None 时 core 走通用规则（构造调用取类名）。
-        典型用途：self.X = genv.Y -> 'genv.Y'。
+        典型用途：self.X = gw.Y -> 'gw.Y'。
         """
         return None
 
     def class_facts(self, cd, ctx):
         """ClassDef 级事实（装饰器等）-> [(表名, 行元组), ...]。
 
-        典型用途：@Components(...) 装饰器 -> comp_raw 行。
+        典型用途：@Inject(...) 一类组件注入装饰器 -> comp_raw 行。
         """
         return []
 
     def class_stmt_fact(self, stmt, ctx):
         """类子树内单条语句 -> (表名, 行元组) 或 None。
 
-        典型用途：Property("x", Type) 声明 -> attr 行；genv.X = self -> global_assign 行。
+        典型用途：decl("x", Type) 一类声明式属性 -> attr 行；
+        gw.X = self -> global_assign 行。
         """
         return None
 
@@ -78,9 +79,9 @@ class FactsHooks(object):
         """函数体内任意 Call 节点 -> [(side, event), ...]。
 
         用于事件分发习语：side=方向名（listen/publish 约定，对 core 不
-        透明），event=事件常量键。常量键建议用 ctx.imports 把 events.X
+        透明），event=事件常量键。常量键建议用 ctx.imports 把 evt_mod.X
         归一成「模块路径.常量名」（如 pkg.events.ON_X），保证订阅
-        与发布两侧不同 import 写法可 join。装饰器 Call（@ListenTo(X)）
+        与发布两侧不同 import 写法可 join。订阅装饰器 Call（@on(X)）
         同样经本钩子访问；返回 [] 走通用规则。
         """
         return []
@@ -110,7 +111,7 @@ class FactsHooks(object):
 
         用于声明式框架约定产生的动态回调边。kind 是供结果分级显示的
         稳定类型名，source 是声明项，target 是目标方法名。core 只负责
-        保存和按类/继承/@Components 共同宿主验证，不认识具体框架语法。
+        保存和按类/继承/组件共同宿主验证，不认识具体框架语法。
         """
         return []
 

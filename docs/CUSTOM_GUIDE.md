@@ -7,9 +7,9 @@
 核心原则：**qcodemap/ 是项目无关的引擎，custom/ 是唯一的定制层**。
 核心包不 import custom 的任何具体名字，一切经钩子协议与配置装载连接。
 
-## 1. 换项目适配：三个文件
+## 1. 换项目适配：五个文件
 
-把 `custom/` 拷一份改三处即可，核心包零改动：
+把 `custom/` 拷一份改其中几处即可，核心包零改动：
 
 ### 1.1 custom/config.py —— 项目档案
 
@@ -34,7 +34,8 @@ NAMES_DOWNSAMPLE_PREFIXES = ['src/generated_tables/']
 ### 1.2 custom/facts.py —— 框架习语钩子（可选）
 
 没有框架习语就删掉此文件，只剩通用事实（self.X=构造、return 构造）。
-有的话继承 `qcodemap.hooks.FactsHooks` 覆写四个方法（详见 §3）。
+有的话继承 `qcodemap.hooks.FactsHooks` 覆写需要的钩子（全部 12 个见 §3，
+常用四个起步：assign_value_type/class_facts/class_stmt_fact/rpc_facts）。
 
 ### 1.3 custom/seeds.py —— 人工种子（可选）
 
@@ -58,11 +59,15 @@ seeds：custom 键覆盖内置同键种子（dict 合并语义）
 ```
 
 custom 文件按路径 importlib 动态加载（`qcodemap_custom_config` 等模块名），
-缺失哪个文件就用哪个默认——所以三个文件全部可选。
+缺失哪个文件就用哪个默认——所以五个文件全部可选（ui_profile/tbui_index
+仅 ui-refs 需要，见 §7）。
 
-## 3. 扩展框架语义：FactsHooks 七个钩子
+## 3. 扩展框架语义：FactsHooks 十二个钩子
 
-先在目标代码里确认习语的真实形态（`grep -n` 看实际写法），再实现：
+先在目标代码里确认习语的真实形态（`grep -n` 看实际写法），再实现。
+协议全貌见 `qcodemap/hooks.py`；下面列常用七个（其余五个：importall_members、
+receiver_type_facts、handler_facts、project_diagnostics 见 hooks.py docstring，
+ui_facts/build_done 见 §7）：
 
 ```python
 from qcodemap.hooks import FactsHooks, FactContext
@@ -230,7 +235,7 @@ core 将 `kind` 作为结果标签（如 `PROPERTY-INFERRED`），并仅在声�
 目标方法类属于同类、继承链或共享精确 `@Components` 宿主时成边。没有
 共同宿主证据的同名方法直接丢弃，避免跨玩法误连。
 
-### 参考：孵化案例的四类习语（真实 custom/facts.py 的抽象）
+### 参考：孵化案例的六类习语（真实 custom/facts.py 的抽象）
 
 | 习语 | 事实 | 换框架时的对应物 |
 | --- | --- | --- |
@@ -238,8 +243,9 @@ core 将 `kind` 作为结果标签（如 `PROPERTY-INFERRED`），并仅在声�
 | `genv.X = self` | global_assign | 任意全局命名空间注入 |
 | `@Components(A, mod.B, *pkg.importall())` | comp_raw 三形态 | 任意组合/注入装饰器 |
 | `{Host}Member` 命名约定 | importall_members 钩子 | 你的组件命名规则 |
-| `CallServer('X')` 等 7 族字符串分发 | rpc（RPC_DISPATCHERS 分发表） | 任意字符串分发 RPC/消息总线 |
+| `CallServer('X')` 等 5 通道族字符串分发（30 个分发方法） | rpc（RPC_DISPATCHERS 分发表 + RPC_CHAN_ALIASES 通道等价） | 任意字符串分发 RPC/消息总线 |
 | `@ListenTo`/`@Subscribe` ↔ `Broadcast`/`Publish` 事件分发 | pubsub（订阅/发布分发表 + import 归一事件键） | 任意事件总线/信号槽 |
+| seek 族寻节点 / csb 加载 / 动画播放（§7） | ui_binding + 自管资源库 | 任意 UI/资源树绑定 |
 
 ## 4. 扩展查询能力
 
@@ -286,8 +292,9 @@ rows = store.con.execute(
 
 ## 6. 发布与部署注意
 
-- `cache/` 与 `__pycache__` 不入库；qcodemap/ + custom/ + tests/ + docs/
-  随仓库走
+- `cache/` 与 `__pycache__` 不入库；qcodemap/ + tests/（自包含两件）+ docs/
+  随公开仓库走；custom/ 五件 .py 属项目档案，不入公开仓库（仅随附
+  custom/README.md 模板说明）
 - MCP 注册条目（项目 .codex/mcp.json）里的 `cwd` 是绝对路径，换机器要改
 - 被分析项目完全无感知（零写入）；索引库删了重建即恢复
 
@@ -318,8 +325,8 @@ profile（custom/ui_profile.py 的 `Profile` 类）向 core 注入词汇：kind 
 `*_DYNAMIC` kind 并列入 profile.dynamic_kinds——不参与配对，audit 单列
 DYNAMIC 统计与清单（静态盲区的可见性）。
 
-custom/config.py 三个键（缺省不启用）：`UI_TBUI_ROOT`（资源源目录）、
-`UI_CSB_ROOT`（包内产物目录，漂移标注）、`UI_INDEX_DB`（自管库路径）。
+custom/config.py 三个键（缺省不启用）：`UI_RES_ROOT`（资源源目录）、
+`UI_RES_ARTIFACT_ROOT`（包内产物目录，漂移标注）、`UI_INDEX_DB`（自管库路径）。
 
 换框架适配点：分发表（UI_WIDGET_LOADERS/UI_SEEKERS/...）换成你项目的
 资源加载/寻子 API 名；拼接前缀提取用 core 的 `scanner.pattern_prefix`

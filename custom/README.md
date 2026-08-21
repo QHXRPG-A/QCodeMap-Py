@@ -23,5 +23,5 @@ EXCLUDE_FILES = []               # 文件名排除（fnmatch）
 
 - 装载优先级：defaults 兜底 ← 本目录覆盖 ← CLI 参数最高
 - 多项目共存：`--custom <目录>` 或环境变量 `QCODEMAP_CUSTOM` 指向不同档案，`--db` 分库
-- 框架习语钩子的写法与四类习语参考表：见 [docs/CUSTOM_GUIDE.md](../docs/CUSTOM_GUIDE.md)
+- 框架习语钩子的写法与习语参考表：见 [docs/CUSTOM_GUIDE.md](../docs/CUSTOM_GUIDE.md)
 - 事实如何被两阶段查询消费：见 [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md)

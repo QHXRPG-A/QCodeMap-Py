@@ -484,7 +484,7 @@ def _impact_closure(store, cfg, funcs, depth, callbacks=None):
             enqueue({'class': fn['class'], 'func': fn['func'], 'file': df}, 0)
 
     # 声明式框架边：由 custom 钩子产出通用 callback_raw，core 只按
-    # 同类/继承/@Components 宿主验证。声明变更时，目标回调属于第一层影响。
+    # 同类/继承/组件宿主验证。声明变更时，目标回调属于第一层影响。
     if callbacks:
         resolver = rmod.Resolver(store, cfg)
         for raw in callbacks:

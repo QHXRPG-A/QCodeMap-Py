@@ -420,8 +420,8 @@ _TOOLS = [
     {
         'name': 'qcodemap_rpc_refs',
         'description': 'RPC 方法名双端配对：字符串分发调用点（RPC-INFERRED，含通道'
-                       '与 stub）+ handler 定义（HANDLER）。适用于 CallServer/'
-                       'CallClient/stub 等字符串分发形态的跨端跳转。',
+                       '与 stub）+ handler 定义（HANDLER）。适用于按方法名字符串'
+                       '分发的 RPC 调用形态的跨端跳转。',
         'inputSchema': {'type': 'object',
                         'properties': {'method': {'type': 'string',
                                                   'description': 'RPC 方法名字符串'},
@@ -434,8 +434,8 @@ _TOOLS = [
     {
         'name': 'qcodemap_pubsub_refs',
         'description': '事件名双端配对：发布调用点（EVENT-INFERRED）+ 订阅'
-                       'handler（LISTENER）。适用于 @ListenTo/@Subscribe ↔ '
-                       'Broadcast/Publish 事件分发形态的跨模块跳转。',
+                       'handler（LISTENER）。适用于订阅装饰器 ↔ 广播/发布调用'
+                       '的事件分发形态跨模块跳转。',
         'inputSchema': {'type': 'object',
                         'properties': {'event': {'type': 'string',
                                                  'description': '事件常量名'
@@ -488,7 +488,8 @@ _TOOLS = [
     {
         'name': 'qcodemap_get_file_context',
         'description': '单文件完整消费面打包：类/定义清单、imports+外部模块、'
-                       'importers+枢纽判定、Property/组件框架事实，一次拿全省往返。',
+                       'importers+枢纽判定、声明式属性/组件等框架事实'
+                       '（custom 钩子定义），一次拿全省往返。',
         'inputSchema': {'type': 'object',
                         'properties': {'file': {'type': 'string',
                                                 'description': '相对项目根的路径'}},

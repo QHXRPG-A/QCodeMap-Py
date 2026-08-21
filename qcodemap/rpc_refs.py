@@ -12,10 +12,8 @@ from qcodemap import resolve as rmod
 
 
 def _chan_names(cfg):
-    """通道显示名（custom/config.py 的 RPC_CHANNELS 可覆盖）。"""
-    default = {'C2S': '客户端→服务端', 'S2C': '服务端→客户端',
-               'MAILBOX': 'mailbox 回调', 'STUB': '跨服 stub', 'DES': 'Des 协议'}
-    return getattr(cfg, 'rpc_channels', None) or default
+    """通道代码 -> 显示名；词表完全由 custom/config.py 的 RPC_CHANNELS 提供。"""
+    return getattr(cfg, 'rpc_channels', None) or {}
 
 
 def rpc_refs(store, cfg, method, stub=None, json_out=True):
@@ -43,8 +41,11 @@ def rpc_refs(store, cfg, method, stub=None, json_out=True):
     handler_locations = set()
     for f, ln, chan, endpoint, confidence, reason in handler_rows:
         endpoint_match = not stub or endpoint == stub
+        # handler 通道与调用通道的等价关系（如实现侧通道可配对 stub 形调用）
+        # 由 custom 的 RPC_CHAN_ALIASES 声明，core 不内置任何通道语义
+        aliases = getattr(cfg, 'rpc_chan_aliases', None) or {}
         direction_match = not call_chans or chan in call_chans \
-            or (chan == 'SERVER' and 'STUB' in call_chans)
+            or any(c in call_chans for c in aliases.get(chan, ()))
         if not endpoint_match or not direction_match:
             continue
         level = ('HANDLER-VERIFIED' if confidence == 'verified'
@@ -67,8 +68,8 @@ def rpc_refs(store, cfg, method, stub=None, json_out=True):
                       'line': ln,
                       'caller': '%s.%s' % (dcls, method) if dcls else method,
                       'match': 'name-only'})
-    # 调用点落在 ast 失败文件的场景（如 cimp_replay.py 的 CallServerNew）
-    # 只索引 names 不产 rpc 行——note 提示走 usages 补漏
+    # 调用点落在 ast 失败文件的场景（旧语法文件只索引 names 不产 rpc 行）
+    # ——note 提示走 usages 补漏
     note = ''
     bad = store.parse_failed_files()
     if bad:
