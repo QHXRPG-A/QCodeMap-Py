@@ -17,6 +17,7 @@ custom/tbui_index.py
 
 # 含内部项目信息（内部框架习语 / 内部路径），脱敏后再公开
 REQUIREMENTS.md
+README.internal.md
 tests/test_callback.py
 tests/test_local_imports.py
 tests/test_pubsub.py
