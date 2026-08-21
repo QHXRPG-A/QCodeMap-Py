@@ -19,6 +19,8 @@ custom/tbui_index.py
 REQUIREMENTS.md
 README.internal.md
 class-facts-mindmap.internal.md
+class-facts-mindmap.internal.svg
+_gen_mindmap_svg.py
 tests/test_callback.py
 tests/test_local_imports.py
 tests/test_pubsub.py
