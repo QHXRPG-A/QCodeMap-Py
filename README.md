@@ -4,7 +4,7 @@
 
 # 🗺️ QCodeMap
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.x-blue.svg)](https://www.python.org/downloads/) [![Dependencies](https://img.shields.io/badge/dependencies-0-pure%20stdlib-success.svg)]() [![MCP](https://img.shields.io/badge/MCP-16_tools-blueviolet.svg)]() [![Version](https://img.shields.io/badge/version-v0.9-orange.svg)]()
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.x-blue.svg)](https://www.python.org/downloads/) [![Dependencies](https://img.shields.io/badge/dependencies-0-pure%20stdlib-success.svg)]() [![MCP](https://img.shields.io/badge/MCP-17_tools-blueviolet.svg)]() [![Version](https://img.shields.io/badge/version-v0.9-orange.svg)]()
 
 A **semantic navigation index** for Python codebases, especially large projects
 with heavy framework usage. QCodeMap scans definitions, calls, and dynamic
@@ -248,7 +248,7 @@ traceable evidence rather than a guess.
 ## 🔌 MCP Server
 
 ```bash
-python -m qcodemap mcp   # stdio server with 16 tools; works with any MCP client
+python -m qcodemap mcp   # stdio server with 17 tools; works with any MCP client
 ```
 
 Once registered, an AI agent can use callers/callees for call chains,

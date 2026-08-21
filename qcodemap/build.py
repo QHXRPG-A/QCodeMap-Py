@@ -108,7 +108,8 @@ def collect_files(cfg):
 
 _ALL_TABLES = ('meta', 'files', 'names', 'defs', 'classes', 'imports', 'attr',
                'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'pubsub',
-               'receiver_fact', 'rpc_handler', 'callback_raw', 'edges')
+               'receiver_fact', 'rpc_handler', 'callback_raw', 'ui_binding',
+               'edges')
 
 
 def _prepare_rebuild(db_path):
@@ -265,6 +266,16 @@ def build(cfg, rebuild=False, verbose=True, scope_rels=None, vacuum=False):
                                else 'complete')
             store.set_meta('coverage_status', coverage_status)
             store.set_meta('targets_json', json.dumps(cfg.targets, ensure_ascii=False))
+        # build 收尾钩子：custom 顺带刷新引擎管线外的资源索引（默认无操作）
+        phase_t0 = time.time()
+        try:
+            cfg.hooks.build_done(store, cfg, stages)
+        except Exception as exc:  # 资源索引失败不阻断主库产出
+            sys.stderr.write('[qcodemap] build_done hook failed: %r\n' % (exc,))
+            sys.stderr.flush()
+            stages['build_done'] = 'failed: %r' % (exc,)
+        else:
+            stages['build_done'] = round(time.time() - phase_t0, 3)
         phase_t0 = time.time()
         store.commit()
         stages['commit'] = round(time.time() - phase_t0, 3)
@@ -301,7 +312,8 @@ def build(cfg, rebuild=False, verbose=True, scope_rels=None, vacuum=False):
 def _drop_all(store):
     for table in ('files', 'names', 'defs', 'classes', 'imports', 'attr',
                   'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'pubsub',
-                  'receiver_fact', 'rpc_handler', 'callback_raw', 'edges'):
+                  'receiver_fact', 'rpc_handler', 'callback_raw',
+                  'ui_binding', 'edges'):
         store.con.execute('DELETE FROM %s' % table)
 
 

@@ -11,7 +11,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 DDL = '''
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -54,6 +54,10 @@ CREATE INDEX IF NOT EXISTS idx_pubsub_file ON pubsub(file);
 CREATE TABLE IF NOT EXISTS callback_raw(
     file TEXT, line INT, class TEXT, kind TEXT, source TEXT, target TEXT);
 CREATE INDEX IF NOT EXISTS idx_callback_target ON callback_raw(target);
+CREATE TABLE IF NOT EXISTS ui_binding(
+    file TEXT, line INT, kind TEXT, key TEXT, receiver TEXT, cls TEXT, func TEXT);
+CREATE INDEX IF NOT EXISTS idx_ui_binding_key ON ui_binding(key);
+CREATE INDEX IF NOT EXISTS idx_ui_binding_file ON ui_binding(file);
 CREATE TABLE IF NOT EXISTS edges(
     name TEXT, def_file TEXT, def_line INT, kind TEXT, payload TEXT,
     PRIMARY KEY(name, def_file, def_line, kind));
@@ -62,7 +66,7 @@ CREATE TABLE IF NOT EXISTS edges(
 # file 列直接存路径、可直接级联删除的表（names 走 file_id 单独处理）
 CASCADE_TABLES = ('defs', 'classes', 'imports', 'attr', 'global_assign',
                   'comp_raw', 'ret', 'rpc', 'receiver_fact', 'rpc_handler',
-                  'pubsub', 'callback_raw')
+                  'pubsub', 'callback_raw', 'ui_binding')
 
 
 class Store(object):
@@ -133,7 +137,8 @@ class Store(object):
         # 其余事实表行 = 完整表行；列数以 DDL 为准，按首行宽度生成占位符
         for table in ('defs', 'classes', 'imports', 'attr',
                       'global_assign', 'ret', 'comp_raw', 'rpc',
-                      'receiver_fact', 'rpc_handler', 'pubsub', 'callback_raw'):
+                      'receiver_fact', 'rpc_handler', 'pubsub', 'callback_raw',
+                      'ui_binding'):
             data = rows.get(table)
             if data:
                 marks = ','.join('?' * len(data[0]))

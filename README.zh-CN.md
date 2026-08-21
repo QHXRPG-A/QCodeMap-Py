@@ -4,7 +4,7 @@
 
 # 🗺️ QCodeMap
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.x-blue.svg)](https://www.python.org/downloads/) [![Dependencies](https://img.shields.io/badge/dependencies-0-pure%20stdlib-success.svg)]() [![MCP](https://img.shields.io/badge/MCP-16_tools-blueviolet.svg)]() [![Version](https://img.shields.io/badge/version-v0.9-orange.svg)]()
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.x-blue.svg)](https://www.python.org/downloads/) [![Dependencies](https://img.shields.io/badge/dependencies-0-pure%20stdlib-success.svg)]() [![MCP](https://img.shields.io/badge/MCP-17_tools-blueviolet.svg)]() [![Version](https://img.shields.io/badge/version-v0.9-orange.svg)]()
 
 面向 Python 代码库（尤其是大型、重框架的项目）的**语义级导航索引**：把代码里的
 定义、调用，连同框架特有的动态写法（组件注入、声明式属性、运行时注入的全局
@@ -214,7 +214,7 @@ ast 解析失败的文件会在 coverage 里标成 partial，不会悄悄缺数�
 ## 🔌 MCP Server
 
 ```bash
-python -m qcodemap mcp   # stdio，16 个工具，可注册进任意 MCP 客户端
+python -m qcodemap mcp   # stdio，17 个工具，可注册进任意 MCP 客户端
 ```
 
 注册后，AI agent 查代码直接查库：callers / callees 定位调用链、

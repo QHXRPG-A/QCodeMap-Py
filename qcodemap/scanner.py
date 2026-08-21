@@ -53,6 +53,36 @@ def dotted(node):
     return None
 
 
+def pattern_prefix(node):
+    """动态字符串实参 -> 可提取的字面前缀；提不出返回 None。
+
+    覆盖四种拼接形态：f-string（取首个字面段）、'%s' % x（取 % 前部分）、
+    'p_' + x（左操作数为字面量）、'p_{}'.format(x)（取首个 { 前）。
+    动态段之后的常量不入前缀（防 'btn_{i}_x' 误配到 'btn_1_x' 之外的形态）。
+    """
+    if isinstance(node, ast.JoinedStr) and node.values:
+        first = node.values[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str) \
+                and first.value:
+            return first.value
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod) \
+            and isinstance(node.left, ast.Constant) \
+            and isinstance(node.left.value, str) and '%' in node.left.value:
+        return node.left.value.split('%', 1)[0]
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add) \
+            and isinstance(node.left, ast.Constant) \
+            and isinstance(node.left.value, str) and node.left.value:
+        return node.left.value
+    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+            and node.func.attr == 'format' \
+            and isinstance(node.func.value, ast.Constant) \
+            and isinstance(node.func.value.value, str):
+        head = node.func.value.value.split('{', 1)[0]
+        if head:
+            return head
+    return None
+
+
 def scan_file(rel, path, hooks=None, downsample=False, profile='full'):
     """扫描单文件，返回 {表名: [完整行, ...]}；names 行为 (name, line, col)。
 
@@ -68,7 +98,7 @@ def scan_file(rel, path, hooks=None, downsample=False, profile='full'):
     r = {'names': [], 'defs': [], 'classes': [], 'imports': [],
          'attr': [], 'global_assign': [], 'ret': [], 'comp_raw': [],
          'rpc': [], 'receiver_fact': [], 'rpc_handler': [], 'pubsub': [],
-         'callback_raw': [], 'parse_ok': True}
+         'callback_raw': [], 'ui_binding': [], 'parse_ok': True}
     if profile == 'full':
         r['names'] = _identifier_names(text, downsample)
     ast_text = text
@@ -417,6 +447,9 @@ def _scan_function(fn, r, rel, mod, cls, hooks, imp_map=None,
                     (rel, node.lineno, expr, typ, confidence, reason))
             for (side, event) in hooks.pubsub_facts(node, fctx):
                 r['pubsub'].append((rel, node.lineno, side, event, fn.name, cls))
+            for (kind, key, receiver) in hooks.ui_facts(node, fctx):
+                r['ui_binding'].append(
+                    (rel, node.lineno, kind, key, receiver, cls, fn.name))
     for nested in _direct_nested_functions(fn):
         r['defs'].append((rel, nested.lineno, cls, nested.name))
         nested_map = imp_map

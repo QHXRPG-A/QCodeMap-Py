@@ -121,6 +121,18 @@ def main(argv=None):
     p_pubsub.add_argument('--db', default=None)
     p_pubsub.add_argument('--json', action='store_true')
 
+    p_ui = sub.add_parser('ui-refs', help='UI 资源绑定查询（资源名/节点名/动画名 ↔ Python）')
+    p_ui.add_argument('name', nargs='?', default=None,
+                      help='资源名（带不带路径前缀/后缀均可）、节点名或动画名')
+    p_ui.add_argument('--kind', default=None, choices=['file', 'anim'],
+                      help='视图类型：file=资源视图（缺省按名字形态推断）/ anim=动画名')
+    p_ui.add_argument('--py', default=None, help='改为按 Python 文件列出全部 UI 事实')
+    p_ui.add_argument('--audit', action='store_true',
+                      help='全量审计：分级统计 + MISS/归属失败清单（改名安全报告）')
+    p_ui.add_argument('--root', default=None)
+    p_ui.add_argument('--db', default=None)
+    p_ui.add_argument('--json', action='store_true')
+
     p_deps = sub.add_parser('deps', help='文件/目录依赖了谁（文件级边）')
     p_deps.add_argument('target')
     p_deps.add_argument('--db', default=None)
@@ -183,7 +195,7 @@ def main(argv=None):
     p_diagnose = sub.add_parser('diagnose', help='运行 custom 项目级诊断')
 
     _complete_query_options((
-        p_callers, p_callees, p_usages, p_rpc, p_pubsub, p_deps, p_imp,
+        p_callers, p_callees, p_usages, p_rpc, p_pubsub, p_ui, p_deps, p_imp,
         p_hubs, p_tree, p_blast, p_find, p_fctx, p_ctx, p_defs, p_diagnose,
     ))
 
@@ -306,6 +318,24 @@ def main(argv=None):
         try:
             out = pubsub_refs.pubsub_refs(store, cfg, args.event,
                                           side=args.side, json_out=args.json)
+        finally:
+            store.close()
+        if args.json:
+            freshness.attach_index(out, index_meta)
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+        else:
+            print(out)
+        return 0
+    if args.cmd == 'ui-refs':
+        from qcodemap import ui_refs
+        from qcodemap.store import Store
+        store = Store(args.db or cfg.db_path)
+        try:
+            if args.audit:
+                out = ui_refs.ui_audit(store, cfg, json_out=args.json)
+            else:
+                out = ui_refs.ui_refs(store, cfg, name=args.name, kind=args.kind,
+                                      py_file=args.py, json_out=args.json)
         finally:
             store.close()
         if args.json:

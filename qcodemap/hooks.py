@@ -85,6 +85,26 @@ class FactsHooks(object):
         """
         return []
 
+    def ui_facts(self, call, ctx):
+        """函数体内任意 Call 节点 -> [(kind, key, receiver), ...]。
+
+        用于资源/字符串绑定习语（UI 资源加载、按名寻节点、动画名播放等）：
+        kind 是 custom 自定义的稳定类型名（对 core 不透明，仅作分级标签），
+        key 是资源键（资源文件名 / 节点名 / 动画名等），receiver 是调用点的
+        源码式 receiver 点分表达式或 None（如 'self.root_widget'）。
+        所在类/函数由 scanner 补齐，行结构见 store 的 ui_binding 表。
+        """
+        return []
+
+    def build_done(self, store, cfg, stats):
+        """build 收尾钩子（写完 meta 之后、commit 之前调用）。
+
+        用于 build 期顺带刷新引擎管线之外的项目资源索引（custom 自管库）。
+        store 是主库 Store；stats 是 build 的统计 dict（可只读 stage 耗时）。
+        默认无操作。
+        """
+        return None
+
     def callback_facts(self, stmt, ctx):
         """类体声明语句 -> [(kind, source, target), ...]。
 

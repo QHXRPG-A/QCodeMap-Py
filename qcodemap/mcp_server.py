@@ -21,6 +21,7 @@ from qcodemap import freshness as freshness_mod
 from qcodemap import pubsub_refs as pubsub_mod
 from qcodemap import resolve as rmod
 from qcodemap import rpc_refs as rpc_mod
+from qcodemap import ui_refs as ui_mod
 from qcodemap import structure as st_mod
 from qcodemap.store import Store
 
@@ -52,6 +53,24 @@ def _scope_rels(store, target):
     pref = target.rstrip('/') + '/%'
     return [p for (p,) in store.con.execute(
         'SELECT path FROM files WHERE path LIKE ?', (pref,))]
+
+
+def _ui_refs_tool_desc(tool):
+    """tools/list 时注入 profile 的项目词汇描述。
+
+    静态表里是通用占位文案（引擎层不含项目词汇）；有 custom profile 时
+    换成 profile.ui_tool_description，参数描述保持通用。
+    """
+    try:
+        cfg = config_mod.load_config()
+        desc = getattr(cfg.ui_profile, 'ui_tool_description', '')
+    except Exception:  # noqa: BLE001 -- 描述获取失败回退通用文案
+        desc = ''
+    if desc:
+        out = dict(tool)
+        out['description'] = desc
+        return out
+    return tool
 
 
 def _refresh_if_drifted(cfg, rels):
@@ -223,6 +242,22 @@ def _tool_pubsub_refs(args):
     try:
         out = pubsub_mod.pubsub_refs(store, cfg, args['event'],
                                      side=args.get('side'), json_out=True)
+    finally:
+        store.close()
+    return freshness_mod.attach_index(out, index)
+
+
+def _tool_ui_refs(args):
+    cfg = config_mod.load_config()
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
+    store = Store(cfg.db_path)
+    try:
+        if args.get('audit'):
+            out = ui_mod.ui_audit(store, cfg, json_out=True)
+        else:
+            out = ui_mod.ui_refs(store, cfg, name=args.get('name'),
+                                 kind=args.get('kind'), py_file=args.get('py'),
+                                 json_out=True)
     finally:
         store.close()
     return freshness_mod.attach_index(out, index)
@@ -412,6 +447,35 @@ _TOOLS = [
         'handler': _tool_pubsub_refs,
     },
     {
+        'name': 'qcodemap_ui_refs',
+        'description': 'UI 资源绑定双向查询（项目词汇描述由 custom 的 '
+                       'ui_profile 提供；未提供 profile 时仅输出绑定事实）',
+        'inputSchema': {'type': 'object',
+                        'properties': {'name': {'type': 'string',
+                                                'description': '资源名/'
+                                                               '节点名/'
+                                                               '动画名'},
+                                       'kind': {'type': 'string',
+                                                'enum': ['file', 'anim'],
+                                                'description': '视图：file=资源'
+                                                               '（缺省按名字形态'
+                                                               '推断）/anim=动画名'},
+                                       'py': {'type': 'string',
+                                              'description': 'Python 相对路径：'
+                                                             '列该文件全部 UI '
+                                                             '事实（与 name 二选一）'},
+                                       'audit': {'type': 'boolean',
+                                                 'description': '全量审计模式：'
+                                                                '分级统计 + '
+                                                                'MISS/归属失败/'
+                                                                'TYPE-MISMATCH/'
+                                                                'DYNAMIC 清单'
+                                                                '（资源改名'
+                                                                '安全报告）'}},
+                        'required': []},
+        'handler': _tool_ui_refs,
+    },
+    {
         'name': 'qcodemap_find_file',
         'description': '模糊路径搜索（子串匹配，ASCII 大小写不敏感，短路径优先）。'
                        '路径记不清时先用它定位。',
@@ -476,7 +540,10 @@ def _handle(msg):
         return None
     if method == 'tools/list':
         return _ok(msg_id, {'tools': [
-            {k: v for k, v in t.items() if k != 'handler'} for t in _TOOLS]})
+            {k: v for k, v in _ui_refs_tool_desc(t).items() if k != 'handler'}
+            if t['name'] == 'qcodemap_ui_refs'
+            else {k: v for k, v in t.items() if k != 'handler'}
+            for t in _TOOLS]})
     if method == 'tools/call':
         params = msg.get('params') or {}
         name = params.get('name')

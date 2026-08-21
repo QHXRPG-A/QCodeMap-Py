@@ -7,10 +7,13 @@ __pycache__/
 *.pyo
 
 # 项目档案不入库：custom/ 只随附 README.md 模板，
-# 各项目的 config/facts/seeds 留在本地（含孵化案例的三件）
+# 各项目的 config/facts/seeds 留在本地（含孵化案例的五件：
+# 三件基础 + ui_profile/tbui_index 两件 UI 资源查询词汇层）
 custom/config.py
 custom/facts.py
 custom/seeds.py
+custom/ui_profile.py
+custom/tbui_index.py
 
 # 含内部项目信息（内部框架习语 / 内部路径），脱敏后再公开
 REQUIREMENTS.md
@@ -24,6 +27,7 @@ tests/test_scale.py
 tests/test_structure.py
 tests/test_blast.py
 tests/test_mcp.py
+tests/test_ui_refs.py
 tests/original/
 
 # IDE / 系统

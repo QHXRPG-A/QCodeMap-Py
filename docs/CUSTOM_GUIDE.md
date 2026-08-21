@@ -281,6 +281,7 @@ rows = store.con.execute(
 | 某方法找不到 VERIFIED 边 | 先 usages 看定义点是否唯一；同名多处属正常降级 |
 | 某返回类型解析不出 | custom/seeds.py 加 RET_SEEDS（语境近似写注释） |
 | 组件方法归属 | comp 表：`SELECT host FROM comp WHERE comp=?` |
+| UI 资源绑定查询 | `ui-refs` 子命令 / MCP `qcodemap_ui_refs`（见 §7） |
 | 缓存疑似过期 | 改动文件后 build 即失效；解析器升级自动整体失效 |
 
 ## 6. 发布与部署注意
@@ -289,3 +290,39 @@ rows = store.con.execute(
   随仓库走
 - MCP 注册条目（项目 .codex/mcp.json）里的 `cwd` 是绝对路径，换机器要改
 - 被分析项目完全无感知（零写入）；索引库删了重建即恢复
+
+## 7. UI 资源绑定扩展（ui-refs）
+
+代码 ↔ UI 资源双向查询，孵化于孵化案例（2026-08）。三层结构：
+
+1. **钩子 `ui_facts(call, ctx) -> [(kind, key, receiver), ...]`**：函数体内
+   任意 Call 提取（scanner 补 rel/line/cls/func 入 `ui_binding` 表）。
+   kind 是 custom 自定义稳定名（CSB_CREATE/SEEK/ANIM_PLAY 等），key 是
+   资源键（csb 裸名/节点名/动画名），receiver 是调用点 receiver 表达式。
+2. **钩子 `build_done(store, cfg, stats)`**：build 收尾调用（commit 前），
+   custom 顺带刷新引擎管线外的资源索引。孵化案例在 custom/tbui_index.py
+   里解析 tbui JSON（RootNode/Children 递归 + FileNode RefName 嵌套展开 +
+   Animations 时间线/轨道），写**自管 sqlite**（cfg.ui_index_db）——资源
+   目录通常在被分析项目之外（跨盘/非 .py），core 的 INCLUDE_PATHS 不适用。
+3. **查询 `ui-refs`（qcodemap/ui_refs.py）**：三视图组合主库 ui_binding 与
+   资源库——csb 名（文件视图：加载点+树摘要）、节点名（节点视图：SEEK-EXACT/
+   MULTI/PATTERN/UNBOUND/MISS/DYNAMIC 分级配对）、动画名（ANIM-DEF 定义 +
+   ANIM-PLAY 播放点归属推导）。
+
+profile（custom/ui_profile.py 的 `Profile` 类）向 core 注入词汇：kind 分组
+（class_bind/node/pattern/dynamic/load/anim/item/wrapper）、寻访 attr 集、
+锚点 receiver、资源适配器（roots/named/descend/has_timeline，LIKE 参数
+须经 `qcodemap.ui_refs.like_escape` 转义并带 `ESCAPE '\\'`）、
+`ui_tool_description`（MCP 工具描述的项目词汇版，tools/list 时注入；core
+静态表只放通用占位文案）。动态形态（实参为变量/下标/拼接不可解）建议入
+`*_DYNAMIC` kind 并列入 profile.dynamic_kinds——不参与配对，audit 单列
+DYNAMIC 统计与清单（静态盲区的可见性）。
+
+custom/config.py 三个键（缺省不启用）：`UI_TBUI_ROOT`（资源源目录）、
+`UI_CSB_ROOT`（包内产物目录，漂移标注）、`UI_INDEX_DB`（自管库路径）。
+
+换框架适配点：分发表（UI_WIDGET_LOADERS/UI_SEEKERS/...）换成你项目的
+资源加载/寻子 API 名；拼接前缀提取用 core 的 `scanner.pattern_prefix`
+（f-string/%/+拼接/.format 四形态）；tbui_index.py 换成你的资源格式解析
+器；查询侧分级标签体系（EXACT/MULTI/MISS）通用。回归锚定孵化案例的
+真实钩子与资源格式（tests/test_ui_refs.py 留本地，公开环境无法复跑）。
