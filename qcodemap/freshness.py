@@ -19,7 +19,7 @@ def ensure_fresh(cfg, mode='auto', throttle_seconds=0.0):
     if throttle_seconds and cached and now - cached[0] < throttle_seconds:
         return dict(cached[1])
 
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         stored_fp = store.get_meta('analysis_fingerprint')
         current_fp = analysis_fingerprint(cfg)
@@ -49,9 +49,10 @@ def ensure_fresh(cfg, mode='auto', throttle_seconds=0.0):
         if mode == 'auto' and drift:
             build_mod.build(cfg, verbose=False, scope_rels=drift)
             refreshed = True
-            store = Store(cfg.db_path)
+            store = Store.open_reader(cfg.db_path)
             try:
                 built_at = store.get_meta('built_at')
+                coverage_status = store.get_meta('coverage_status') or 'complete'
                 profiles = dict(store.con.execute(
                     'SELECT profile, COUNT(*) FROM files GROUP BY profile'))
             finally:
@@ -64,6 +65,8 @@ def ensure_fresh(cfg, mode='auto', throttle_seconds=0.0):
         'refresh_mode': mode,
         'scan_elapsed': round(scan_elapsed, 3),
         'config_fingerprint': current_fp,
+        'scope': {'status': coverage_status, 'profiles': profiles},
+        # 兼容 v0.9 消费方；它表示 build scope，不是查询 AST coverage。
         'coverage': coverage_status,
         'profiles': profiles,
     }

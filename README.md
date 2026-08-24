@@ -4,7 +4,7 @@
 
 # 🗺️ QCodeMap
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.x-blue.svg)](https://www.python.org/downloads/) [![Dependencies](https://img.shields.io/badge/dependencies-0-pure%20stdlib-success.svg)]() [![MCP](https://img.shields.io/badge/MCP-17_tools-blueviolet.svg)]() [![Version](https://img.shields.io/badge/version-v0.9-orange.svg)]()
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.x-blue.svg)](https://www.python.org/downloads/) [![Dependencies](https://img.shields.io/badge/dependencies-0-pure%20stdlib-success.svg)]() [![MCP](https://img.shields.io/badge/MCP-17_tools-blueviolet.svg)]() [![Version](https://img.shields.io/badge/version-v0.10-orange.svg)]()
 
 A **semantic navigation index** for Python codebases, especially large projects
 with heavy framework usage. QCodeMap scans definitions, calls, and dynamic
@@ -108,7 +108,7 @@ minutes to sub-second time, and every result remains traceable to source.
 ## 📊 Benchmarks
 
 Pilot repository: approximately 9,000 game client/server files (2026-08-20,
-v0.9).
+v0.10).
 
 | Metric | Result |
 | --- | --- |
@@ -204,7 +204,7 @@ python -m qcodemap context --compact                 # Compact project profile f
 Every query command supports the same `--root`, `--db`, `--json`, and
 `--refresh auto|check|off` options. JSON responses include `schema_version`,
 `coverage`, and `index` metadata: build time, refresh status, drift count,
-configuration fingerprint, and index coverage. Files that fail AST parsing are
+configuration fingerprint, and `index.scope`. Files that fail AST parsing are
 reported as partial coverage instead of disappearing silently.
 
 The CLI returns full `blast-radius` output by default for compatibility; MCP
@@ -219,11 +219,16 @@ defaults to `summary`. Request details with
   injection, and declarative properties—are translated by `custom/facts.py`
   hooks into rows the generic core can consume. **Stub knowledge becomes index
   data.**
+- Module-level registries or generated tables can emit generic `binding` facts;
+  `custom` owns their field and fallback semantics, while the core only stores
+  and joins opaque relations.
 - Queries first retrieve name candidates, then verify them with MRO, component
   edges, data flow, and return-type evidence.
 - Index files remain separate from source and can always be rebuilt. CLI and MCP
   queries scan the repository file set and mtimes by default, then refresh only
   files that were added, modified, or deleted.
+- Query connections are SQLite read-only snapshots; WAL and a single-writer
+  build lock allow reads to continue during incremental refreshes.
 - The core knows nothing about a particular project. Framework conventions and
   indexing scope live entirely under `custom/`; the public repository includes
   only a template in `custom/README.md`.

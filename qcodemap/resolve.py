@@ -582,8 +582,9 @@ def _display(cls, func):
 # v5: modmap 基于全部已索引文件（原仅含类文件）——纯模块项目的
 #     mod.func() 调用从静默降级恢复为可验证；
 # v6: import 按词法作用域解析 + 钩子约定回调严格宿主连边；
-# v7: 约定回调边缓存纳入共同宿主文件 mtime
-RESOLVER_VERSION = 8
+# v7: 约定回调边缓存纳入共同宿主文件 mtime；
+# v8: receiver/handler 事实并入解析；v9: receiver 经 MRO/组件归并目标
+RESOLVER_VERSION = 9
 
 
 # 内置函数/常见运行时名：callees 收集时的噪音过滤
@@ -640,6 +641,9 @@ def _load_edges(store, cfg, name, def_file, def_line, kind):
 
 
 def _save_edges(store, name, def_file, def_line, kind, items, ref_files):
+    # CLI/MCP 查询连接严格只读；边缓存只是加速项，不能反向制造写锁。
+    if getattr(store, 'read_only', False):
+        return
     mtimes = {}
     for rel in ref_files:
         row = store.con.execute('SELECT mtime FROM files WHERE path=?', (rel,)).fetchone()
@@ -682,6 +686,24 @@ def _receiver_fact(resolver, file, line, func):
         'SELECT type,confidence,reason FROM receiver_fact '
         'WHERE file=? AND line=? AND expr=? ORDER BY type',
         (file, line, expr)).fetchall()
+
+
+def _receiver_fact_targets(resolver, facts, from_file, func, direct_target=None,
+                           direct_class=None):
+    """receiver 类型事实 -> 方法定义；继承和组件注入统一走 mro_has_method。"""
+    out = []
+    for fact in facts:
+        typ = fact[0]
+        hits = set()
+        if direct_target is not None and typ == direct_class:
+            hits.add(direct_target)
+        for cls_file in resolver._class_files(typ, from_file):
+            hit = resolver.mro_has_method(typ, cls_file, func)
+            if hit:
+                hits.add(hit)
+        for hit in sorted(hits):
+            out.append((hit, fact))
+    return out
 
 
 def callers(store, cfg, file, func, resolver=None, receiver_class=None):
@@ -728,7 +750,11 @@ def callers(store, cfg, file, func, resolver=None, receiver_class=None):
         receiver_facts = _receiver_fact(r, f, ln, func)
         wanted_class = receiver_class or def_cls
         if receiver_facts:
-            matching = [fact for fact in receiver_facts if fact[0] == wanted_class]
+            target = (def_file, def_line)
+            matching = [fact for hit, fact in _receiver_fact_targets(
+                r, receiver_facts, f, func,
+                direct_target=target, direct_class=wanted_class)
+                if hit == target]
             if not matching:
                 continue
             if got != (def_file, def_line):
@@ -811,14 +837,13 @@ def callees(store, cfg, file, func):
                 got = r.resolve_call(def_file, call.lineno, cname)
                 if got is None:
                     facts = _receiver_fact(r, def_file, call.lineno, cname)
-                    inferred = None
-                    if len({fact[0] for fact in facts}) == 1:
-                        typ, _confidence, reason = facts[0]
-                        for cls_file in r._class_files(typ, def_file):
-                            inferred = r.mro_has_method(typ, cls_file, cname)
-                            if inferred:
-                                break
+                    targets = {}
+                    for inferred, fact in _receiver_fact_targets(
+                            r, facts, def_file, cname):
+                        targets.setdefault(inferred, []).append(fact)
+                    inferred = next(iter(targets)) if len(targets) == 1 else None
                     if inferred:
+                        typ, _confidence, reason = targets[inferred][0]
                         if inferred in got_defs:
                             continue
                         got_defs.add(inferred)

@@ -11,7 +11,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 DDL = '''
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -58,6 +58,13 @@ CREATE TABLE IF NOT EXISTS ui_binding(
     file TEXT, line INT, kind TEXT, key TEXT, receiver TEXT, cls TEXT, func TEXT);
 CREATE INDEX IF NOT EXISTS idx_ui_binding_key ON ui_binding(key);
 CREATE INDEX IF NOT EXISTS idx_ui_binding_file ON ui_binding(file);
+CREATE INDEX IF NOT EXISTS idx_ui_binding_kind_key ON ui_binding(kind, key);
+CREATE TABLE IF NOT EXISTS binding(
+    file TEXT, line INT, domain TEXT, owner TEXT, relation TEXT, target TEXT,
+    variant TEXT, confidence TEXT, reason TEXT);
+CREATE INDEX IF NOT EXISTS idx_binding_owner ON binding(domain, owner, variant);
+CREATE INDEX IF NOT EXISTS idx_binding_target ON binding(domain, relation, target);
+CREATE INDEX IF NOT EXISTS idx_binding_file ON binding(file);
 CREATE TABLE IF NOT EXISTS edges(
     name TEXT, def_file TEXT, def_line INT, kind TEXT, payload TEXT,
     PRIMARY KEY(name, def_file, def_line, kind));
@@ -66,26 +73,56 @@ CREATE TABLE IF NOT EXISTS edges(
 # file 列直接存路径、可直接级联删除的表（names 走 file_id 单独处理）
 CASCADE_TABLES = ('defs', 'classes', 'imports', 'attr', 'global_assign',
                   'comp_raw', 'ret', 'rpc', 'receiver_fact', 'rpc_handler',
-                  'pubsub', 'callback_raw', 'ui_binding')
+                  'pubsub', 'callback_raw', 'ui_binding', 'binding')
 
 
 class Store(object):
 
-    def __init__(self, db_path):
+    def __init__(self, db_path, read_only=False):
         self.path = str(db_path)
+        self.read_only = bool(read_only)
+        if self.read_only:
+            path = Path(self.path).resolve()
+            if not path.exists():
+                raise RuntimeError('索引库不存在，请先执行 qcodemap build: %s' % path)
+            self.con = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)
+            self.con.execute('PRAGMA query_only=ON')
+            self.con.execute('PRAGMA busy_timeout=5000')
+            self._validate_schema(require_version=True)
+            return
+
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.con = sqlite3.connect(self.path)
-        # 缓存库可再生，建库吞吐优先
-        self.con.execute('PRAGMA journal_mode=MEMORY')
-        self.con.execute('PRAGMA synchronous=OFF')
+        # WAL 允许查询读取构建前的完整快照；NORMAL 对可再生缓存兼顾吞吐与完整性。
+        self.con.execute('PRAGMA busy_timeout=5000')
+        self.con.execute('PRAGMA journal_mode=WAL')
+        self.con.execute('PRAGMA synchronous=NORMAL')
         self.con.executescript(DDL)
-        ver = self.get_meta('schema_version')
+        self._validate_schema(require_version=False)
+        self.set_meta('schema_version', str(SCHEMA_VERSION))
+
+    @classmethod
+    def open_reader(cls, db_path):
+        """打开不执行 DDL/meta 写入的只读查询连接。"""
+        return cls(db_path, read_only=True)
+
+    @classmethod
+    def open_writer(cls, db_path):
+        """打开建库/测试写连接；保留构造器默认行为的显式入口。"""
+        return cls(db_path, read_only=False)
+
+    def _validate_schema(self, require_version):
+        try:
+            ver = self.get_meta('schema_version')
+        except sqlite3.OperationalError as exc:
+            raise RuntimeError('索引库缺少 QCodeMap schema，请先执行 qcodemap build') from exc
+        if require_version and ver is None:
+            raise RuntimeError('索引库缺少 schema_version，请执行 qcodemap build --rebuild')
         if ver is not None and int(ver) != SCHEMA_VERSION:
             raise RuntimeError('缓存库 schema 版本 %s 与当前 %d 不符，'
                                'rebuild=True 或 CLI --rebuild 重建（若已带该参数，'
                                '说明旧库连接残留，删除 cache 库文件后重试）'
                                % (ver, SCHEMA_VERSION))
-        self.set_meta('schema_version', str(SCHEMA_VERSION))
 
     # ---- 基础 ----
 
@@ -97,10 +134,13 @@ class Store(object):
         self.con.execute('INSERT OR REPLACE INTO meta VALUES(?,?)', (key, str(value)))
 
     def commit(self):
+        if self.read_only:
+            raise RuntimeError('只读 Store 不允许 commit')
         self.con.commit()
 
     def close(self):
-        self.con.commit()
+        if not self.read_only:
+            self.con.commit()
         self.con.close()
 
     # ---- 文件级增量 ----
@@ -138,7 +178,7 @@ class Store(object):
         for table in ('defs', 'classes', 'imports', 'attr',
                       'global_assign', 'ret', 'comp_raw', 'rpc',
                       'receiver_fact', 'rpc_handler', 'pubsub', 'callback_raw',
-                      'ui_binding'):
+                      'ui_binding', 'binding'):
             data = rows.get(table)
             if data:
                 marks = ','.join('?' * len(data[0]))

@@ -129,6 +129,10 @@ def main(argv=None):
     p_ui.add_argument('--py', default=None, help='改为按 Python 文件列出全部 UI 事实')
     p_ui.add_argument('--audit', action='store_true',
                       help='全量审计：分级统计 + MISS/归属失败清单（改名安全报告）')
+    p_ui.add_argument('--limit', type=int, default=200,
+                      help='单页最多返回条数（1-1000，默认 200）')
+    p_ui.add_argument('--offset', type=int, default=0,
+                      help='分页起点（默认 0）')
     p_ui.add_argument('--root', default=None)
     p_ui.add_argument('--db', default=None)
     p_ui.add_argument('--json', action='store_true')
@@ -235,7 +239,7 @@ def main(argv=None):
     if args.cmd in ('deps', 'importers', 'hubs', 'tree'):
         from qcodemap import structure as st
         from qcodemap.store import Store
-        store = Store(args.db or cfg.db_path)
+        store = Store.open_reader(args.db or cfg.db_path)
         try:
             if args.cmd == 'deps':
                 out = st.deps(store, args.target.replace('\\', '/'), args.json)
@@ -256,7 +260,7 @@ def main(argv=None):
     if args.cmd in ('find', 'file-context', 'context'):
         from qcodemap import context as ctx
         from qcodemap.store import Store
-        store = Store(args.db or cfg.db_path)
+        store = Store.open_reader(args.db or cfg.db_path)
         try:
             if args.cmd == 'find':
                 out = ctx.find_file(store, args.pattern, limit=args.limit,
@@ -277,7 +281,7 @@ def main(argv=None):
     if args.cmd == 'blast-radius':
         from qcodemap import blast
         from qcodemap.store import Store
-        store = Store(args.db or cfg.db_path)
+        store = Store.open_reader(args.db or cfg.db_path)
         try:
             bfiles = blast_snapshot[0] if blast_snapshot else (
                 args.files.split(',') if args.files else None)
@@ -299,7 +303,7 @@ def main(argv=None):
     if args.cmd == 'rpc-refs':
         from qcodemap import rpc_refs
         from qcodemap.store import Store
-        store = Store(args.db or cfg.db_path)
+        store = Store.open_reader(args.db or cfg.db_path)
         try:
             out = rpc_refs.rpc_refs(store, cfg, args.method, stub=args.stub,
                                     json_out=args.json)
@@ -314,7 +318,7 @@ def main(argv=None):
     if args.cmd == 'pubsub-refs':
         from qcodemap import pubsub_refs
         from qcodemap.store import Store
-        store = Store(args.db or cfg.db_path)
+        store = Store.open_reader(args.db or cfg.db_path)
         try:
             out = pubsub_refs.pubsub_refs(store, cfg, args.event,
                                           side=args.side, json_out=args.json)
@@ -329,13 +333,14 @@ def main(argv=None):
     if args.cmd == 'ui-refs':
         from qcodemap import ui_refs
         from qcodemap.store import Store
-        store = Store(args.db or cfg.db_path)
+        store = Store.open_reader(args.db or cfg.db_path)
         try:
             if args.audit:
                 out = ui_refs.ui_audit(store, cfg, json_out=args.json)
             else:
                 out = ui_refs.ui_refs(store, cfg, name=args.name, kind=args.kind,
-                                      py_file=args.py, json_out=args.json)
+                                      py_file=args.py, json_out=args.json,
+                                      limit=args.limit, offset=args.offset)
         finally:
             store.close()
         if args.json:
@@ -348,7 +353,7 @@ def main(argv=None):
     if args.cmd == 'diagnose':
         from qcodemap import diagnostics
         from qcodemap.store import Store
-        store = Store(args.db or cfg.db_path)
+        store = Store.open_reader(args.db or cfg.db_path)
         try:
             out = diagnostics.diagnose(store, cfg)
         finally:
@@ -363,7 +368,7 @@ def main(argv=None):
                     item.get('code'), item.get('file'), item.get('line'),
                     item.get('message')))
         return 0
-    store = resolve.Store(args.db or cfg.db_path)
+    store = resolve.Store.open_reader(args.db or cfg.db_path)
     try:
         if args.cmd == 'callers':
             out = resolve.callers(store, cfg, args.file, args.func,

@@ -32,14 +32,14 @@
 | `defaults.py` | 内建默认配置 | 保证裸核心（无 custom）对任意 Python 目录可用 |
 | `hooks.py` | 事实提取钩子协议（FactsHooks/FactContext） | 通用 receiver/handler/diagnostics 协议是框架习语与核心的唯一接缝，见 CUSTOM_GUIDE |
 | `scanner.py` | 单文件扫描：names 倒排 + defs/classes/词法 imports + 事实原始行 | Python tokenizer 只收 NAME；semantic-only 不写 names；ast 失败保留可用事实 |
-| `store.py` | SQLite 封装：DDL / files 登记（mtime/profile）/ file 级联删除 | names.file 用 file_id；receiver_fact/rpc_handler 分别保存接收者与 handler 证据 |
-| `build.py` | 遍历 + mtime/profile 增量 + pass2 组件解析 | partial targets 只清理范围内；普通增量不 VACUUM；大库并行 scan 并分阶段报时 |
+| `store.py` | SQLite 封装：DDL / reader-writer 隔离 / files 登记与级联删除 | reader 用只读 URI；writer 用 WAL；names.file 用 file_id |
+| `build.py` | 遍历 + mtime/profile 增量 + pass2 组件解析 | 跨进程单 writer 锁；partial targets 只清理范围内；大库并行 scan |
 | `resolve.py` | 两阶段语义验证 + callers/callees/usages + 约定回调 + edges 缓存 | 性能敏感区，见 §4 |
 | `structure.py` | deps/importers/hubs/tree 结构四命令 | 纯 SQL + 内存 modmap，无 ast-grep；coverage 按 scope 内 parse_ok 给 partial |
 | `blast.py` | 变更影响面：变更集采集 + 调用链闭包 + 输出投影 | 完整计算后提供 summary/page/full；caller 按 layer、importers 独立分页 |
 | `rpc_refs.py` | RPC 双端配对查询：rpc 表调用点 + defs 表 handler | RPC-INFERRED/HANDLER 分级；stub 精确配对优先，方法名兜底 |
 | `pubsub_refs.py` | 事件双端配对查询：pubsub 表两侧事实 | EVENT-INFERRED/LISTENER 分级；裸事件名按后缀匹配分组（防跨端撞名） |
-| `ui_refs.py` | UI 资源绑定双向查询：ui_binding 事实 × custom 资源库三步配对 | EXACT/MULTI/MISS/INDIRECT/UNBOUND/PATTERN/DYNAMIC 分级；audit 输出存量债与改名安全报告 |
+| `ui_refs.py` | UI 资源绑定双向查询：ui_binding/binding 事实 × custom 资源库 | 声明关系可配 wrapper；EXACT/MULTI/MISS/INDIRECT/UNBOUND/PATTERN/DYNAMIC 分级；普通查询分页 |
 | `context.py` | agent 消费面三命令：find_file / get_file_context / context | 全查表无 ast 现扫；context 为一次性项目档案（qcodemap.context/v1） |
 | `freshness.py` | 查询前新鲜度契约 | auto/check/off；全仓文件集+mtime 增量刷新；配置/schema/hook 指纹不匹配拒绝旧结果 |
 | `fingerprint.py` | 索引指纹：custom 目录全部 .py 内容 + 配置/profile 哈希 | custom 词表改动即失效旧库，防用旧语义回答新问题 |
@@ -62,6 +62,7 @@
 | `rpc` | 字符串分发 RPC 调用点：(file, line, chan, method, stub)，stub 可 NULL | 数千（见附录 F） |
 | `pubsub` | 事件分发两侧事实：(file, line, side, event, func, cls)，event 是 import 归一的常量键 | 数千（见附录 G） |
 | `ui_binding` | custom 声明的资源绑定事实：(file,line,class,kind,key,receiver,wrapper,...)，kind 对 core 不透明 | 5.7 万（SEEK 族为主） |
+| `binding` | custom 模块级声明归一后的不透明关系：(domain,owner,relation,target,variant,confidence,reason) | 按项目声明增长 |
 | `callback_raw` | custom 声明的通用约定回调：(file,line,class,kind,source,target) | 数千 |
 | `receiver_fact` | custom 提供的调用点 receiver 类型证据 | 按项目规则增长 |
 | `rpc_handler` | custom 提供的 RPC handler、方向、端点与证据等级 | 按项目规则增长 |
@@ -127,6 +128,8 @@ scanner 把 ast 解析失败记为 files.parse_ok=0（事实降级仅保 names�
 structure 按 scope（deps/importers 的目标集）给 partial 并附 issues 文件
 清单；callers 对候选落在坏文件的边注明「所在文件 ast 解析失败」，agent
 可区分「索引残缺」与「语义歧义」。对齐 codemap 的 complete/partial 契约。
+查询结果的 `coverage` 只表达 AST 覆盖；`index.scope.status` 表达索引是
+complete 还是 targeted。旧 `index.coverage` 暂作兼容别名，不再混作查询覆盖率。
 
 ### 5.8 统一新鲜度
 所有 CLI/MCP 查询按 `auto|check|off` 执行全仓文件集与 mtime 检查；auto
@@ -134,6 +137,8 @@ structure 按 scope（deps/importers 的目标集）给 partial 并附 issues �
 MCP 的 auto 检查进程内节流 1 秒。schema、配置、profile 或 custom hook
 指纹不匹配时拒绝返回旧结果，不在查询路径静默触发完整重建。JSON 统一返回
 `index` 元数据。本项目约 9000 文件的新鲜度扫描实测 0.61 秒。
+查询 Store 全程只读，不执行 DDL、meta 写入或 edges 缓存写入；增量 build
+由单 writer 锁串行，WAL reader 可继续读取构建前的完整快照。
 
 ### 5.9 RPC 双端配对（P3-2：字符串分发的约定边）
 孵化案例的 RPC 全部是字符串分发（`CallServer('X', ...)` / `CallClient` /
@@ -215,5 +220,6 @@ CLI 默认 full 保持旧行为；MCP 默认 summary。page 模式以 callers/im
 | `test_local_imports.py` | 局部 import 结构边 + 词法隔离 + custom 事件归一 | ~1s |
 | `test_ui_refs.py` | ui_facts 提取 + tbui 展开 + 三视图配对 + audit（真实 custom 词表小样） | ~10s |
 | `test_p5.py` | partial targets、新鲜度、指纹、profile、receiver、RPC、诊断、UTF-8、blast hunk | ~6s |
+| `test_p6.py` | 只读 Store/WAL 快照、单 writer 锁、通用 binding、ui-refs 分页、core/custom 边界 | ~1s |
 
 动任何 qcodemap/ 代码后全部回归都跑；只动 custom/ 至少跑 feasibility、scale、p5。

@@ -82,7 +82,7 @@ def _refresh_if_drifted(cfg, rels):
     rels = [r for r in (rels or []) if r]
     if not rels:
         return None
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         drifted = build_mod.drift_check(store, cfg, rels)
     finally:
@@ -107,7 +107,7 @@ def _tool_build(args):
 def _tool_callers(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         out = rmod.callers(store, cfg, args['file'], args['func'],
                            receiver_class=args.get('receiver_class'))
@@ -119,7 +119,7 @@ def _tool_callers(args):
 def _tool_callees(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         out = rmod.callees(store, cfg, args['file'], args['func'])
     finally:
@@ -130,7 +130,7 @@ def _tool_callees(args):
 def _tool_usages(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         out = rmod.usages(store, cfg, args['symbol'], limit=int(args.get('limit', 200)))
     finally:
@@ -141,7 +141,7 @@ def _tool_usages(args):
 def _tool_deps(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         out = st_mod.deps(store, args['target'], json_out=True)
     finally:
@@ -152,7 +152,7 @@ def _tool_deps(args):
 def _tool_importers(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         out = st_mod.importers(store, args['target'], json_out=True)
     finally:
@@ -162,7 +162,7 @@ def _tool_importers(args):
 
 def _scope_rels_probe(cfg, target):
     """为懒刷新取目标文件集（单开短命连接；空目标/超量由 drift_check 兜底）。"""
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         return _scope_rels(store, target)
     finally:
@@ -172,7 +172,7 @@ def _scope_rels_probe(cfg, target):
 def _tool_hubs(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         out = st_mod.hubs(store, top=int(args.get('top', 25)), json_out=True)
     finally:
@@ -183,7 +183,7 @@ def _tool_hubs(args):
 def _tool_tree(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         out = st_mod.tree(store, cfg, depth=int(args.get('depth', 2)), json_out=True)
     finally:
@@ -206,7 +206,7 @@ def _tool_blast(args):
     if flist is not None and not args.get('rev'):
         diffs, old_sources = blast_mod.collect_working_diffs(cfg, flist)
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         out = blast_mod.blast(store, cfg,
                               files=flist,
@@ -226,7 +226,7 @@ def _tool_blast(args):
 def _tool_rpc_refs(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         out = rpc_mod.rpc_refs(store, cfg, args['method'],
                                stub=args.get('stub'), json_out=True)
@@ -238,7 +238,7 @@ def _tool_rpc_refs(args):
 def _tool_pubsub_refs(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         out = pubsub_mod.pubsub_refs(store, cfg, args['event'],
                                      side=args.get('side'), json_out=True)
@@ -250,14 +250,16 @@ def _tool_pubsub_refs(args):
 def _tool_ui_refs(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         if args.get('audit'):
             out = ui_mod.ui_audit(store, cfg, json_out=True)
         else:
             out = ui_mod.ui_refs(store, cfg, name=args.get('name'),
                                  kind=args.get('kind'), py_file=args.get('py'),
-                                 json_out=True)
+                                 json_out=True,
+                                 limit=int(args.get('limit', 200)),
+                                 offset=int(args.get('offset', 0)))
     finally:
         store.close()
     return freshness_mod.attach_index(out, index)
@@ -266,7 +268,7 @@ def _tool_ui_refs(args):
 def _tool_find_file(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         out = ctx_mod.find_file(store, args['pattern'],
                                 limit=int(args.get('limit', 50)), json_out=True)
@@ -278,7 +280,7 @@ def _tool_find_file(args):
 def _tool_get_file_context(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         out = ctx_mod.get_file_context(store, cfg, args['file'], json_out=True)
     finally:
@@ -289,7 +291,7 @@ def _tool_get_file_context(args):
 def _tool_context(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         out = ctx_mod.context(store, cfg, compact=bool(args.get('compact')),
                               json_out=True)
@@ -301,7 +303,7 @@ def _tool_context(args):
 def _tool_defs(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         out = rmod.defs(store, args['symbol'], limit=int(args.get('limit', 200)))
     finally:
@@ -312,7 +314,7 @@ def _tool_defs(args):
 def _tool_diagnose(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
-    store = Store(cfg.db_path)
+    store = Store.open_reader(cfg.db_path)
     try:
         out = diagnostics_mod.diagnose(store, cfg)
     finally:
@@ -471,7 +473,13 @@ _TOOLS = [
                                                                 'TYPE-MISMATCH/'
                                                                 'DYNAMIC 清单'
                                                                 '（资源改名'
-                                                                '安全报告）'}},
+                                                                '安全报告）'},
+                                       'limit': {'type': 'integer',
+                                                 'default': 200,
+                                                 'description': '单页条数，最大 1000'},
+                                       'offset': {'type': 'integer',
+                                                  'default': 0,
+                                                  'description': '分页起点'}},
                         'required': []},
         'handler': _tool_ui_refs,
     },

@@ -8,6 +8,7 @@
 
 import ast
 import concurrent.futures
+import contextlib
 import fnmatch
 import json
 import os
@@ -20,6 +21,47 @@ from qcodemap import scanner
 from qcodemap.store import Store
 
 _WORKER_HOOKS = None
+
+
+@contextlib.contextmanager
+def build_lock(db_path, timeout=60.0):
+    """跨进程串行化同一索引库的 writer；reader 仍可读取 WAL 快照。"""
+    lock_path = str(db_path) + '.build.lock'
+    os.makedirs(os.path.dirname(os.path.abspath(lock_path)), exist_ok=True)
+    lock_file = open(lock_path, 'a+b')
+    acquired = False
+    started = time.monotonic()
+    try:
+        lock_file.seek(0, os.SEEK_END)
+        if lock_file.tell() == 0:
+            lock_file.write(b'\0')
+            lock_file.flush()
+        while not acquired:
+            lock_file.seek(0)
+            try:
+                if os.name == 'nt':
+                    import msvcrt
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lock_file.fileno(),
+                                fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except (OSError, IOError):
+                if time.monotonic() - started >= timeout:
+                    raise RuntimeError('等待索引构建锁超时，请稍后重试: %s' % lock_path)
+                time.sleep(0.05)
+        yield
+    finally:
+        if acquired:
+            lock_file.seek(0)
+            if os.name == 'nt':
+                import msvcrt
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
 
 
 def _init_scan_worker(custom_dir):
@@ -109,7 +151,7 @@ def collect_files(cfg):
 _ALL_TABLES = ('meta', 'files', 'names', 'defs', 'classes', 'imports', 'attr',
                'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'pubsub',
                'receiver_fact', 'rpc_handler', 'callback_raw', 'ui_binding',
-               'edges')
+               'binding', 'edges')
 
 
 def _prepare_rebuild(db_path):
@@ -156,7 +198,18 @@ def _in_selected_scope(cfg, rel):
                for t in cfg.targets) or _included(rel, cfg.include_paths)
 
 
-def build(cfg, rebuild=False, verbose=True, scope_rels=None, vacuum=False):
+def build(cfg, rebuild=False, verbose=True, scope_rels=None, vacuum=False,
+          _locked=False):
+    """串行化 writer 后执行建库；_locked 仅供已持锁的内部调用。"""
+    if _locked:
+        return _build(cfg, rebuild=rebuild, verbose=verbose,
+                      scope_rels=scope_rels, vacuum=vacuum)
+    with build_lock(cfg.db_path):
+        return _build(cfg, rebuild=rebuild, verbose=verbose,
+                      scope_rels=scope_rels, vacuum=vacuum)
+
+
+def _build(cfg, rebuild=False, verbose=True, scope_rels=None, vacuum=False):
     """执行（增量）建库，返回统计 dict。rebuild 先清 meta 再建库，
     保证 schema 版本校验（Store 初始化期）不会拦下重建请求。"""
     t0 = time.time()
@@ -174,7 +227,7 @@ def build(cfg, rebuild=False, verbose=True, scope_rels=None, vacuum=False):
 
     if rebuild:
         _prepare_rebuild(cfg.db_path)
-    store = Store(cfg.db_path)
+    store = Store.open_writer(cfg.db_path)
     try:
         previous_fingerprint = store.get_meta('analysis_fingerprint')
         previous_coverage = store.get_meta('coverage_status')
@@ -316,7 +369,7 @@ def _drop_all(store):
     for table in ('files', 'names', 'defs', 'classes', 'imports', 'attr',
                   'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'pubsub',
                   'receiver_fact', 'rpc_handler', 'callback_raw',
-                  'ui_binding', 'edges'):
+                  'ui_binding', 'binding', 'edges'):
         store.con.execute('DELETE FROM %s' % table)
 
 

@@ -53,6 +53,10 @@ class _NoProfile(object):
     anim_load_kind = ''
     anim_play_kind = ''
     item_kind = ''
+    declaration_domain = ''
+    declaration_resource_relation = ''
+    declaration_wrapper_relation = ''
+    declaration_level = 'DECLARED'
     base_stops = frozenset()
     wrapper_node_types = ()
     kind_labels = {}
@@ -79,6 +83,9 @@ class _NoProfile(object):
 
         def timeline_files(self, res, timeline):
             return []
+
+        def timeline_file_count(self, res, timeline):
+            return 0
 
     adapter = _Adapter()
     pattern_kinds = frozenset()
@@ -339,6 +346,18 @@ def _class_bindings(store, profile, cls, seen=None):
             'SELECT key FROM ui_binding WHERE cls=? AND kind IN (%s)' % qmarks,
             (cls,) + tuple(marks)):
         keys.add(key[0])
+    declaration_domain = getattr(profile, 'declaration_domain', '')
+    resource_relation = getattr(profile, 'declaration_resource_relation', '')
+    wrapper_relation = getattr(profile, 'declaration_wrapper_relation', '')
+    if declaration_domain and resource_relation and wrapper_relation:
+        for (key,) in store.con.execute(
+                'SELECT DISTINCT r.target FROM binding w JOIN binding r '
+                'ON r.domain=w.domain AND r.owner=w.owner '
+                'AND r.variant=w.variant '
+                'WHERE w.domain=? AND w.relation=? AND w.target=? '
+                'AND r.relation=?',
+                (declaration_domain, wrapper_relation, cls, resource_relation)):
+            keys.add(key)
     # 路径覆写调用点（key=方法名）-> 覆写定义（profile.getter_*）
     if profile.getter_call_kind:
         for (method,) in store.con.execute(
@@ -387,8 +406,12 @@ def _descend_segments(profile, res, key, segments, pattern_last=False):
 
 
 def _wrapper_allowed(profile, wrapper):
+    # 先精确匹配，避免 UIText 抢先命中 UITexture 这类公共前缀名称。
     for prefix, allowed in profile.wrapper_node_types:
-        if wrapper == prefix or wrapper.startswith(prefix):
+        if wrapper == prefix:
+            return allowed
+    for prefix, allowed in profile.wrapper_node_types:
+        if wrapper.startswith(prefix):
             return allowed
     return None
 
@@ -583,6 +606,40 @@ def _subclass_closure(store, profile, base, cache):
 def _file_view(store, profile, cfg, res, name):
     items = []
     cache = {}
+    declaration_domain = getattr(profile, 'declaration_domain', '')
+    resource_relation = getattr(profile, 'declaration_resource_relation', '')
+    declaration_level = getattr(profile, 'declaration_level', 'DECLARED')
+    if declaration_domain and resource_relation:
+        wrapper_relation = getattr(profile, 'declaration_wrapper_relation', '')
+        if wrapper_relation:
+            rows = store.con.execute(
+                'SELECT r.file,r.line,r.owner,r.variant,r.confidence,r.reason,'
+                'w.target FROM binding r LEFT JOIN binding w '
+                'ON w.domain=r.domain AND w.owner=r.owner '
+                'AND w.variant=r.variant AND w.relation=? '
+                'WHERE r.domain=? AND r.relation=? AND r.target=? '
+                'ORDER BY r.file,r.line,w.target',
+                (wrapper_relation, declaration_domain,
+                 resource_relation, name)).fetchall()
+        else:
+            rows = [(f, ln, owner, variant, confidence, reason, None)
+                    for f, ln, owner, variant, confidence, reason
+                    in store.con.execute(
+                        'SELECT file,line,owner,variant,confidence,reason '
+                        'FROM binding WHERE domain=? AND relation=? AND target=? '
+                        'ORDER BY file,line',
+                        (declaration_domain, resource_relation, name))]
+        for f, ln, owner, variant, confidence, reason, wrapper in rows:
+            note = reason or ''
+            if wrapper is None and wrapper_relation:
+                note = (note + '; ' if note else '') + '未声明 wrapper'
+            items.append({
+                'level': declaration_level,
+                'key': name, 'file': f, 'line': ln,
+                'caller': wrapper or owner, 'owner': owner,
+                'variant': variant, 'confidence': confidence,
+                'note': note,
+            })
     view_kinds = tuple(profile.load_kinds) + (
         (profile.getter_kind,) if profile.getter_kind else ())
     qmarks = ','.join('?' * len(view_kinds))
@@ -607,42 +664,68 @@ def _file_view(store, profile, cfg, res, name):
             items.append({'level': 'RES-MISS', 'key': name,
                           'note': '资源不存在（已删或改名）'})
         else:
+            if declaration_domain and not items:
+                items.append({
+                    'level': 'DECLARATION-MISSING', 'key': name,
+                    'note': '资源存在，但索引中没有代码加载或声明关系',
+                })
             summary = profile.adapter.tree_summary(res, name)
             summary.update({'level': 'RES-TREE', 'key': name})
             items.append(summary)
     return items
 
 
-def _node_view(store, profile, cfg, res, name):
+def _node_view(store, profile, cfg, res, name, limit, offset):
     lazy = LazyAst(cfg, profile)
     cache = {'bind': {}, 'lazy': lazy}
     items = []
     qmarks = ','.join('?' * len(profile.node_kinds))
     # 点分路径行按段召回：首段/末段/中间段三种形态；LIKE 参数须转义
     esc = like_escape(name)
-    sql = ('SELECT file, line, kind, key, receiver, cls, func FROM ui_binding '
-           'WHERE kind IN (%s) AND (key=? OR key LIKE ? ESCAPE \'\\\' '
-           'OR key LIKE ? ESCAPE \'\\\' OR key LIKE ? ESCAPE \'\\\') '
-           'ORDER BY file, line') % qmarks
+    where = ('kind IN (%s) AND (key=? OR key LIKE ? ESCAPE \'\\\' '
+             'OR key LIKE ? ESCAPE \'\\\' OR key LIKE ? ESCAPE \'\\\')') % qmarks
     params = tuple(profile.node_kinds) + (
         name, esc + '.%', '%.' + esc, '%.' + esc + '.%')
-    for row in store.con.execute(sql, params):
+    total = store.con.execute(
+        'SELECT COUNT(*) FROM ui_binding WHERE ' + where, params).fetchone()[0]
+    sql = ('SELECT file, line, kind, key, receiver, cls, func FROM ui_binding '
+           'WHERE ' + where + ' ORDER BY file, line LIMIT ? OFFSET ?')
+    for row in store.con.execute(sql, params + (limit, offset)):
         items.append(_classify_site(store, profile, res, lazy, row, cache))
-    return items
+    return items, total
 
 
-def _anim_view(store, profile, cfg, res, name):
+def _anim_view(store, profile, cfg, res, name, limit, offset):
     items = []
     lazy = LazyAst(cfg, profile)
+    n_defs = 0
     if res is not None and name and profile.anim_play_kind:
-        for key in profile.adapter.timeline_files(res, name):
+        count_fn = getattr(profile.adapter, 'timeline_file_count', None)
+        if count_fn is not None:
+            n_defs = count_fn(res, name)
+            def_offset = min(offset, n_defs)
+            def_limit = min(limit, max(0, n_defs - def_offset))
+            keys = profile.adapter.timeline_files(
+                res, name, limit=def_limit, offset=def_offset)
+        else:
+            all_keys = profile.adapter.timeline_files(res, name)
+            n_defs = len(all_keys)
+            keys = all_keys[offset:offset + limit]
+        for key in keys:
             items.append({'level': 'ANIM-DEF', 'name': name, 'key': key,
                           'note': '资源内定义该时间线'})
+    n_plays = 0
     if profile.anim_play_kind:
+        n_plays = store.con.execute(
+            'SELECT COUNT(*) FROM ui_binding WHERE kind=? AND key=?',
+            (profile.anim_play_kind, name)).fetchone()[0]
+        play_offset = max(0, offset - n_defs)
+        play_limit = max(0, limit - len(items))
         for row in store.con.execute(
                 'SELECT file, line, kind, key, receiver, cls, func '
-                'FROM ui_binding WHERE kind=? AND key=? ORDER BY file, line',
-                (profile.anim_play_kind, name)):
+                'FROM ui_binding WHERE kind=? AND key=? ORDER BY file, line '
+                'LIMIT ? OFFSET ?',
+                (profile.anim_play_kind, name, play_limit, play_offset)):
             attributed = _attributed(store, profile, res, lazy, row) \
                 if res is not None else None
             entry = {'level': 'ANIM-PLAY', 'name': row[3],
@@ -652,15 +735,20 @@ def _anim_view(store, profile, cfg, res, name):
             if res is not None and attributed is None:
                 entry['note'] = '类绑定与挂载内均未见该时间线（ATTRIBUTION-MISS）'
             items.append(entry)
-    return items
+    return items, n_defs + n_plays
 
 
-def ui_refs(store, cfg, name=None, kind=None, py_file=None, json_out=True):
+def ui_refs(store, cfg, name=None, kind=None, py_file=None, json_out=True,
+            limit=200, offset=0):
     """资源绑定双向查询主入口（节点/资源/动画名三视图 + 按文件清单）。"""
     t0 = time.time()
+    limit = max(1, min(int(limit), 1000))
+    offset = max(0, int(offset))
     profile = _profile(cfg)
     res = profile.open_resource(cfg)
     items = []
+    total = 0
+    paged_in_query = False
     view = None
 
     if py_file:
@@ -680,16 +768,39 @@ def ui_refs(store, cfg, name=None, kind=None, py_file=None, json_out=True):
                 items.append({'level': k, 'key': key, 'receiver': receiver,
                               'file': py_file, 'line': ln,
                               'caller': '%s.%s' % (cls, func) if cls else func})
+        declaration_domain = getattr(profile, 'declaration_domain', '')
+        if declaration_domain:
+            declaration_level = getattr(profile, 'declaration_level', 'DECLARED')
+            for ln, owner, relation, target, variant, confidence, reason in \
+                    store.con.execute(
+                        'SELECT line,owner,relation,target,variant,confidence,reason '
+                        'FROM binding WHERE file=? AND domain=? ORDER BY line,relation',
+                        (py_file, declaration_domain)):
+                items.append({
+                    'level': declaration_level,
+                    'key': target, 'file': py_file, 'line': ln,
+                    'caller': owner, 'owner': owner,
+                    'relation': relation, 'variant': variant,
+                    'confidence': confidence, 'note': reason,
+                })
     elif kind == 'anim' and profile.anim_play_kind:
         view = 'anim'
-        items = _anim_view(store, profile, cfg, res, name)
+        items, total = _anim_view(
+            store, profile, cfg, res, name, limit, offset)
+        paged_in_query = True
     elif name and (kind == 'file' or profile.looks_like_key(name)):
         view = 'file'
         name = profile.norm_res_key(name)
         items = _file_view(store, profile, cfg, res, name)
     elif name:
         view = 'node'
-        items = _node_view(store, profile, cfg, res, name)
+        items, total = _node_view(
+            store, profile, cfg, res, name, limit, offset)
+        paged_in_query = True
+
+    if not paged_in_query:
+        total = len(items)
+        items = items[offset:offset + limit]
 
     note = ''
     if isinstance(profile, _NoProfile):
@@ -700,9 +811,13 @@ def ui_refs(store, cfg, name=None, kind=None, py_file=None, json_out=True):
     if bad and not note:
         note = '全库 %d 个文件 ast 解析失败，其中的调用不在结果内' % len(bad)
     out = {
-        'schema_version': 'qcodemap.ui/v2',
+        'schema_version': 'qcodemap.ui/v3',
         'view': view, 'name': name, 'kind': kind, 'py_file': py_file,
         'items': items, 'n_items': len(items),
+        'total': total, 'offset': offset, 'limit': limit,
+        'truncated': offset + len(items) < total,
+        'next_offset': (offset + len(items)
+                        if offset + len(items) < total else None),
         'resource_index': 'ok' if res is not None else 'unavailable',
         'note': note,
         'coverage': {'status': 'partial' if bad else 'complete',

@@ -34,7 +34,7 @@ NAMES_DOWNSAMPLE_PREFIXES = ['src/generated_tables/']
 ### 1.2 custom/facts.py —— 框架习语钩子（可选）
 
 没有框架习语就删掉此文件，只剩通用事实（self.X=构造、return 构造）。
-有的话继承 `qcodemap.hooks.FactsHooks` 覆写需要的钩子（全部 12 个见 §3，
+有的话继承 `qcodemap.hooks.FactsHooks` 覆写需要的钩子（全部 13 个见 §3，
 常用四个起步：assign_value_type/class_facts/class_stmt_fact/rpc_facts）。
 
 ### 1.3 custom/seeds.py —— 人工种子（可选）
@@ -62,10 +62,10 @@ custom 文件按路径 importlib 动态加载（`qcodemap_custom_config` 等模�
 缺失哪个文件就用哪个默认——所以五个文件全部可选（ui_profile/tbui_index
 仅 ui-refs 需要，见 §7）。
 
-## 3. 扩展框架语义：FactsHooks 十二个钩子
+## 3. 扩展框架语义：FactsHooks 十三个钩子
 
 先在目标代码里确认习语的真实形态（`grep -n` 看实际写法），再实现。
-协议全貌见 `qcodemap/hooks.py`；下面列常用七个（其余五个：importall_members、
+协议全貌见 `qcodemap/hooks.py`；下面列常用八个（其余五个：
 receiver_type_facts、handler_facts、project_diagnostics 见 hooks.py docstring，
 ui_facts/build_done 见 §7）：
 
@@ -81,6 +81,11 @@ class MyFacts(FactsHooks):
     def class_facts(self, cd, ctx):
         """ClassDef 级事实（装饰器解析）-> [(表名, 行元组), ...]。
         表名限定 comp_raw；典型：@MyInject(A, mod.B) -> 组件注册。"""
+
+    def module_bindings(self, tree, ctx):
+        """模块 AST -> 声明关系事实。
+        返回 (line,domain,owner,relation,target,variant,confidence,reason)。
+        表/注册表字段和回退语义在 custom 归一；core 不认识字段名。"""
 
     def class_stmt_fact(self, stmt, ctx):
         """类子树内单条语句 -> (表名, 行元组) 或 None。
@@ -113,6 +118,8 @@ class MyFacts(FactsHooks):
 - `global_assign`：`(base_name, attr, class, rel)`
 - `comp_raw`：`(rel, host, kind, value)`，kind ∈ ref/attr/importall
   （ref=同文件/裸名；attr=mod.Cls 前缀；importall=*pkg.importall() 星调用）
+- `binding`：`(rel,line,domain,owner,relation,target,variant,confidence,reason)`；
+  `module_bindings` 返回除 rel 外的八项，owner 在 domain 内应稳定唯一
 - `rpc`：`(rel, line, chan, method, stub)`（stub 可 None；由 rpc_facts
   钩子产出，scanner 负责补 rel/line）
 - `pubsub`：`(rel, line, side, event, func, cls)`（由 pubsub_facts 钩子
@@ -316,6 +323,12 @@ rows = store.con.execute(
    MULTI/PATTERN/UNBOUND/MISS/DYNAMIC 分级配对）、动画名（ANIM-DEF 定义 +
    ANIM-PLAY 播放点归属推导）。
 
+模块级注册表/导表还可经 `module_bindings` 写通用 `binding` 表。profile 用
+`declaration_domain`、`declaration_resource_relation`、
+`declaration_wrapper_relation` 声明 join 词汇；core 返回通用声明证据，项目可
+通过 `declaration_level` 显示为 `TABLE-BOUND` 等标签。字段名、大小变体回退、
+默认 wrapper 都必须在 custom 解释，禁止写进 `qcodemap/`。
+
 profile（custom/ui_profile.py 的 `Profile` 类）向 core 注入词汇：kind 分组
 （class_bind/node/pattern/dynamic/load/anim/item/wrapper）、寻访 attr 集、
 锚点 receiver、资源适配器（roots/named/descend/has_timeline，LIKE 参数
@@ -324,6 +337,8 @@ profile（custom/ui_profile.py 的 `Profile` 类）向 core 注入词汇：kind 
 静态表只放通用占位文案）。动态形态（实参为变量/下标/拼接不可解）建议入
 `*_DYNAMIC` kind 并列入 profile.dynamic_kinds——不参与配对，audit 单列
 DYNAMIC 统计与清单（静态盲区的可见性）。
+普通 `ui-refs` 支持 `limit/offset`，JSON 返回 `total/truncated/next_offset`；
+`audit` 仍是显式全量审计。
 
 custom/config.py 三个键（缺省不启用）：`UI_RES_ROOT`（资源源目录）、
 `UI_RES_ARTIFACT_ROOT`（包内产物目录，漂移标注）、`UI_INDEX_DB`（自管库路径）。

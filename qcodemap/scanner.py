@@ -17,7 +17,9 @@ from qcodemap.hooks import FactContext, FactsHooks
 
 # bytes 字面量行（如 data = load_blob(b'\\xe4..')，二进制产物行）：
 # 转义序列会匹配出海量伪 token，token 化前整段剔除
-_BYTES_LINE = re.compile(r"b'[^']*'|b\"[^\"]*\"")
+_BYTES_LINE = re.compile(
+    r"(?<![A-Za-z0-9_])b'(?:\\.|[^'\\\r\n])*'"
+    r'|(?<![A-Za-z0-9_])b"(?:\\.|[^"\\\r\n])*"')
 BUILTIN_CTORS = ('str', 'int', 'float', 'bool', 'dict', 'list', 'tuple', 'set')
 FUNC_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 _TOP_LEVEL_STRUCTURE = re.compile(r'^(?:class |def |async def )', re.MULTILINE)
@@ -98,7 +100,7 @@ def scan_file(rel, path, hooks=None, downsample=False, profile='full'):
     r = {'names': [], 'defs': [], 'classes': [], 'imports': [],
          'attr': [], 'global_assign': [], 'ret': [], 'comp_raw': [],
          'rpc': [], 'receiver_fact': [], 'rpc_handler': [], 'pubsub': [],
-         'callback_raw': [], 'ui_binding': [], 'parse_ok': True}
+         'callback_raw': [], 'ui_binding': [], 'binding': [], 'parse_ok': True}
     if profile == 'full':
         r['names'] = _identifier_names(text, downsample)
     ast_text = text
@@ -119,6 +121,9 @@ def scan_file(rel, path, hooks=None, downsample=False, profile='full'):
     # import 先于其余语句预扫：结构图记录全部词法作用域；函数级钩子只拿
     # 模块 + 当前/外层函数可见映射，避免不同函数的同名局部别名互相污染。
     imp_map, func_imp_maps, scope_keys = _collect_imports(tree, r, rel, mod)
+    mctx = FactContext(rel, mod, None, imports=imp_map)
+    for row in hooks.module_bindings(tree, mctx):
+        r['binding'].append((rel,) + tuple(row))
     for stmt in _module_stmts(tree):
         if isinstance(stmt, ast.ClassDef):
             _scan_class(stmt, r, rel, mod, hooks, imp_map,

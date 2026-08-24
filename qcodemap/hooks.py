@@ -3,7 +3,8 @@
 
 约定：
 - 所有方法允许缺省实现（返回 None / []），core 回退到通用规则；
-- 事实行 = (表名, 行元组)，表名限定 attr / global_assign / comp_raw，
+- 事实行 = (表名, 行元组)，类级钩子表名限定 attr / global_assign / comp_raw；
+  module_bindings 单独写通用 binding 表，
   行结构必须与 store 对应表的列一致（见 store.DDL）；rpc/pubsub/callback
   钩子返回裸元组，rel/line 等定位列由 scanner 补齐；
 - 伪类型名中含 '.' 且前段是已知全局对象名时，视为运行时全局引用
@@ -48,6 +49,15 @@ class FactsHooks(object):
         """ClassDef 级事实（装饰器等）-> [(表名, 行元组), ...]。
 
         典型用途：@Inject(...) 一类组件注入装饰器 -> comp_raw 行。
+        """
+        return []
+
+    def module_bindings(self, tree, ctx):
+        """模块 AST -> 声明关系事实。
+
+        返回 [(line, domain, owner, relation, target, variant,
+               confidence, reason), ...]。core 仅保存这些不透明字符串；
+        配置表、注册表或其他声明式语法均由 custom 解释。
         """
         return []
 

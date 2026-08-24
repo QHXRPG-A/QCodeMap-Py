@@ -4,7 +4,7 @@
 
 # 🗺️ QCodeMap
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.x-blue.svg)](https://www.python.org/downloads/) [![Dependencies](https://img.shields.io/badge/dependencies-0-pure%20stdlib-success.svg)]() [![MCP](https://img.shields.io/badge/MCP-17_tools-blueviolet.svg)]() [![Version](https://img.shields.io/badge/version-v0.9-orange.svg)]()
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.x-blue.svg)](https://www.python.org/downloads/) [![Dependencies](https://img.shields.io/badge/dependencies-0-pure%20stdlib-success.svg)]() [![MCP](https://img.shields.io/badge/MCP-17_tools-blueviolet.svg)]() [![Version](https://img.shields.io/badge/version-v0.10-orange.svg)]()
 
 面向 Python 代码库（尤其是大型、重框架的项目）的**语义级导航索引**：把代码里的
 定义、调用，连同框架特有的动态写法（组件注入、声明式属性、运行时注入的全局
@@ -90,7 +90,7 @@ qcodemap callers src/logic/avatar.py GetTeammateInfo
 
 ## 📊 实测数据
 
-试点项目：约 9000 文件的游戏客户端 / 服务端代码库（2026-08-20，v0.9）。
+试点项目：约 9000 文件的游戏客户端 / 服务端代码库（2026-08-24，v0.10）。
 
 | 指标 | 数值 |
 | --- | --- |
@@ -180,7 +180,7 @@ python -m qcodemap context --compact                 # 新会话开场的项目�
 
 所有查询命令统一支持 `--root`、`--db`、`--json` 和
 `--refresh auto|check|off`。JSON 输出带 `schema_version`、`coverage` 和
-`index` 元数据（构建时间、刷新情况、漂移数量、配置指纹与覆盖状态）；
+`index` 元数据（构建时间、刷新情况、漂移数量、配置指纹与 `index.scope`）；
 ast 解析失败的文件会在 coverage 里标成 partial，不会悄悄缺数据。
 `blast-radius` 的 CLI 默认 `full` 保持兼容；MCP 默认 `summary`，
 避免一次把海量结果塞满上下文，需要明细时用
@@ -193,10 +193,13 @@ ast 解析失败的文件会在 coverage 里标成 partial，不会悄悄缺数�
 - 框架特有的写法（setattr 组件注入、运行时全局注入、声明式属性）通过
   `custom/facts.py` 钩子解释成核心引擎直接能用的数据行——
   **桩里的知识变成库里的数据**
+- 模块级注册表或导表产物可由 custom 归一成通用 `binding` 关系；字段含义、
+  回退规则留在 custom，core 只保存和 join 不透明关系
 - 查询分两步：先按名字倒排召回候选，再做语义验证（MRO / 组件边 /
   数据流 / 返回值来源）
 - 索引产物在 `cache/`，和源码完全分离、随时可重建；CLI/MCP 查询默认扫描
   全仓文件集和 mtime，发现新增、修改或删除后自动增量刷新
+- 查询连接使用 SQLite 只读快照；WAL 与单 writer 构建锁保证增量刷新时仍可查询
 - 核心引擎不认识任何具体项目；项目相关的写法和索引范围都放在 `custom/`
   定制层（仓库里只带模板说明，见 custom/README.md），换项目不用动核心
 
