@@ -3,6 +3,7 @@
 
 用法示例：
   python -m qcodemap build [--root X] [--targets a,b] [--rebuild]
+  python -m qcodemap callers <symbol> [--json]
   python -m qcodemap callers <file> <func> [--json]
   python -m qcodemap callees <file> <func> [--json]
   python -m qcodemap usages <symbol> [--limit N]
@@ -83,8 +84,10 @@ def main(argv=None):
     p_build.add_argument('--json', action='store_true')
 
     p_callers = sub.add_parser('callers', help='谁调用这个函数')
-    p_callers.add_argument('file', help='函数所在文件（相对 root 的路径）')
-    p_callers.add_argument('func')
+    p_callers.add_argument(
+        'target', help='符号名，或兼容旧用法时的函数所在文件（相对 root）')
+    p_callers.add_argument(
+        'func', nargs='?', help='兼容旧用法：与前一个 file 参数配对的函数名')
     p_callers.add_argument('--root', default=None)
     p_callers.add_argument('--db', default=None)
     p_callers.add_argument('--json', action='store_true')
@@ -111,6 +114,16 @@ def main(argv=None):
     p_rpc.add_argument('--root', default=None)
     p_rpc.add_argument('--db', default=None)
     p_rpc.add_argument('--json', action='store_true')
+
+    p_path = sub.add_parser('path', help='跨普通调用/RPC 的最短符号路径')
+    p_path.add_argument('--from', dest='from_symbol', required=True,
+                        help='起点符号（Func/Class.Func/path.py:Class.Func）')
+    p_path.add_argument('--to', dest='to_symbol', required=True,
+                        help='终点符号（Func/Class.Func/path.py:Class.Func）')
+    p_path.add_argument('--max-depth', type=int, default=6,
+                        help='最大边数（默认 6）')
+    p_path.add_argument('--max-nodes', type=int, default=2000,
+                        help='最大探索定义数（默认 2000）')
 
     p_pubsub = sub.add_parser('pubsub-refs',
                               help='事件名双端配对（发布点+订阅 handler）')
@@ -201,6 +214,7 @@ def main(argv=None):
     _complete_query_options((
         p_callers, p_callees, p_usages, p_rpc, p_pubsub, p_ui, p_deps, p_imp,
         p_hubs, p_tree, p_blast, p_find, p_fctx, p_ctx, p_defs, p_diagnose,
+        p_path,
     ))
 
     sub.add_parser('mcp', help='启动 MCP server（stdio JSON-RPC）')
@@ -315,6 +329,23 @@ def main(argv=None):
         else:
             print(out)
         return 0
+    if args.cmd == 'path':
+        from qcodemap import path_query
+        from qcodemap.store import Store
+        store = Store.open_reader(args.db or cfg.db_path)
+        try:
+            out = path_query.path(
+                store, cfg, args.from_symbol, args.to_symbol,
+                max_depth=max(0, args.max_depth),
+                max_nodes=max(1, args.max_nodes), json_out=args.json)
+        finally:
+            store.close()
+        if args.json:
+            freshness.attach_index(out, index_meta)
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+        else:
+            print(out)
+        return 0
     if args.cmd == 'pubsub-refs':
         from qcodemap import pubsub_refs
         from qcodemap.store import Store
@@ -371,8 +402,13 @@ def main(argv=None):
     store = resolve.Store.open_reader(args.db or cfg.db_path)
     try:
         if args.cmd == 'callers':
-            out = resolve.callers(store, cfg, args.file, args.func,
-                                  receiver_class=args.receiver_class)
+            if args.func is None:
+                out = resolve.callers_by_symbol(
+                    store, cfg, args.target,
+                    receiver_class=args.receiver_class)
+            else:
+                out = resolve.callers(store, cfg, args.target, args.func,
+                                      receiver_class=args.receiver_class)
         elif args.cmd == 'callees':
             out = resolve.callees(store, cfg, args.file, args.func)
         elif args.cmd == 'defs':
@@ -401,6 +437,9 @@ def _print_result(out, as_json):
     if cov and cov.get('status') == 'partial':
         print('coverage: partial（全库 %d 个文件 ast 解析失败，索引仅 names）'
               % cov['parse_failed'])
+        for issue in cov.get('issues', ()):
+            print('  [%s] %s（%s）' % (
+                issue['code'], issue['file'], issue['impact']))
     print('耗时 %.3fs%s  VERIFIED=%d CANDIDATE=%d INFERRED=%d'
           % (out['elapsed'], '（缓存命中）' if out.get('cached') else '',
              out['n_verified'], out['n_candidate'], out.get('n_inferred', 0)))

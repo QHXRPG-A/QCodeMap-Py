@@ -62,11 +62,12 @@ custom 文件按路径 importlib 动态加载（`qcodemap_custom_config` 等模�
 缺失哪个文件就用哪个默认——所以五个文件全部可选（ui_profile/tbui_index
 仅 ui-refs 需要，见 §7）。
 
-## 3. 扩展框架语义：FactsHooks 十三个钩子
+## 3. 扩展框架语义：FactsHooks 十四个钩子
 
 先在目标代码里确认习语的真实形态（`grep -n` 看实际写法），再实现。
-协议全貌见 `qcodemap/hooks.py`；下面列常用八个（其余五个：
-receiver_type_facts、handler_facts、project_diagnostics 见 hooks.py docstring，
+协议全貌见 `qcodemap/hooks.py`；下面列常用八个（其余六个：
+receiver_type_facts、handler_facts、endpoint_aliases、project_diagnostics
+见 hooks.py docstring，
 ui_facts/build_done 见 §7）：
 
 ```python
@@ -161,7 +162,9 @@ class MyFacts(FactsHooks):
         return [(chan, marg.value, stub)]
 ```
 
-配对查询用 `qcodemap rpc-refs <方法名> [--stub X]`；噪音通道删表内
+配对查询用 `qcodemap rpc-refs <方法名> [--stub X]`；`--stub` 是严格
+endpoint 过滤。组件宿主由 core 的标准 `comp` 图展开；跨端类名由 custom
+通过 `endpoint_aliases` 归一，core 不应识别原始字段名或注册 API。噪音通道删表内
 单行即降级。参数位以目标项目分发器的**真实签名**为准（grep 定义处核实，
 勿凭调用样例推断——同一族可能带不同前缀参数）。
 

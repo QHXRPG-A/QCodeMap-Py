@@ -48,8 +48,10 @@ when Git ignores them; they may be the active project profile.
 | Exact text, event string, resource name, or unknown symbol | Start with `rg` |
 | Definition or all identifier occurrences | `defs` / `usages` |
 | Verified callers or callees | `callers` / `callees` |
+| Unknown file for a known symbol | `callers Class.Func` (auto-locate or candidates) |
 | Ambiguous receiver type | `callers --receiver-class <Class>` |
 | String-dispatched RPC or event endpoints | `rpc-refs` / `pubsub-refs` |
+| Cross-boundary call route | `path --from Class.Func --to Endpoint.Handle` |
 | Imports, reverse imports, hubs, or package shape | `deps` / `importers` / `hubs` / `tree` |
 | Working-copy impact | `blast-radius` |
 | Project-level custom invariants | `diagnose` |
@@ -137,6 +139,7 @@ Subclass `FactsHooks` and override only the required methods:
 | `callback_facts` | Declarative callback relationships |
 | `receiver_type_facts` | Receiver type evidence at a call site |
 | `handler_facts` | RPC handler direction, endpoint, and confidence |
+| `endpoint_aliases` | Equivalent cross-end or runtime endpoint names |
 | `project_diagnostics` | Project-specific consistency issues |
 
 Return `[]` or `None` when evidence is insufficient. Never manufacture a type

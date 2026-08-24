@@ -100,7 +100,8 @@ def scan_file(rel, path, hooks=None, downsample=False, profile='full'):
     r = {'names': [], 'defs': [], 'classes': [], 'imports': [],
          'attr': [], 'global_assign': [], 'ret': [], 'comp_raw': [],
          'rpc': [], 'receiver_fact': [], 'rpc_handler': [], 'pubsub': [],
-         'callback_raw': [], 'ui_binding': [], 'binding': [], 'parse_ok': True}
+         'endpoint_alias': [], 'callback_raw': [], 'ui_binding': [],
+         'binding': [], 'parse_ok': True}
     if profile == 'full':
         r['names'] = _identifier_names(text, downsample)
     ast_text = text
@@ -124,6 +125,8 @@ def scan_file(rel, path, hooks=None, downsample=False, profile='full'):
     mctx = FactContext(rel, mod, None, imports=imp_map)
     for row in hooks.module_bindings(tree, mctx):
         r['binding'].append((rel,) + tuple(row))
+    for row in hooks.endpoint_aliases(tree, mctx):
+        r['endpoint_alias'].append((rel,) + tuple(row))
     for stmt in _module_stmts(tree):
         if isinstance(stmt, ast.ClassDef):
             _scan_class(stmt, r, rel, mod, hooks, imp_map,

@@ -147,6 +147,7 @@ python -m qcodemap build --root /path/to/your/project --targets src,lib
 
 # Find callers of a function.
 # VERIFIED = semantically verified edge; CANDIDATE = unresolved same-name match.
+python -m qcodemap callers Avatar.GetTeammateInfo
 python -m qcodemap callers src/logic/avatar.py GetTeammateInfo
 ```
 
@@ -156,8 +157,10 @@ python -m qcodemap callers src/logic/avatar.py GetTeammateInfo
 
 ```bash
 python -m qcodemap callers src/logic/avatar.py GetTeammateInfo  # Who calls it?
+python -m qcodemap callers Avatar.GetTeammateInfo                # Auto-locate; list candidates if ambiguous
 python -m qcodemap callers src/logic/avatar.py Activate --receiver-class FestivalTargetEntity
 python -m qcodemap callees src/logic/avatar.py RefreshToplogo   # What does it call?
+python -m qcodemap path --from Avatar.Start --to Endpoint.Handle # Shortest call + RPC path
 python -m qcodemap usages HasSkywing                            # Identifier occurrences
 python -m qcodemap defs HasSkywing                              # Definitions
 python -m qcodemap diagnose                                     # Project diagnostics from custom hooks
@@ -166,7 +169,9 @@ python -m qcodemap diagnose                                     # Project diagno
 ### RPC and event endpoint pairing
 
 ```bash
-# Pair string-dispatched RPC calls with handlers, including channel and stub.
+# Pair string-dispatched RPC calls with handlers, including channel and endpoint.
+# --stub is strict: component hosts and normalized endpoint aliases can match;
+# unrelated same-name definitions are excluded and empty results explain why.
 python -m qcodemap rpc-refs SetPlayerAimState
 python -m qcodemap rpc-refs ObtainClan --stub ClanStub
 
@@ -205,7 +210,8 @@ Every query command supports the same `--root`, `--db`, `--json`, and
 `--refresh auto|check|off` options. JSON responses include `schema_version`,
 `coverage`, and `index` metadata: build time, refresh status, drift count,
 configuration fingerprint, and `index.scope`. Files that fail AST parsing are
-reported as partial coverage instead of disappearing silently.
+reported as partial coverage instead of disappearing silently; query-related
+files are listed in `coverage.issues`.
 
 The CLI returns full `blast-radius` output by default for compatibility; MCP
 defaults to `summary`. Request details with
@@ -300,7 +306,7 @@ framework.
 
 ```text
 qcodemap/     Project-agnostic core: cli / build / scanner / store / resolve /
-              structure / blast / context / rpc_refs / pubsub_refs / ui_refs /
+              structure / blast / context / path_query / rpc_refs / pubsub_refs / ui_refs /
               freshness / fingerprint / mcp_server / hooks / config / defaults
 custom/       Project layer: config.py (scope) / facts.py (framework hooks) /
               seeds.py (manual facts) / ui_profile.py + tbui_index.py
@@ -308,7 +314,7 @@ custom/       Project layer: config.py (scope) / facts.py (framework hooks) /
               README.md only.
 skill/        Bundled qcodemap-agent onboarding skill for repository navigation
               and sanitized custom integration guidance.
-tests/        Self-contained regressions (test_p4/test_p5 create temporary
+tests/        Self-contained regressions (test_p4 through test_p7 create temporary
               repositories). Pilot-project regressions and custom profiles stay
               in the local workspace and are not published.
 cache/        Rebuildable index artifacts (about 220MB in the pilot; not tracked)
@@ -326,7 +332,7 @@ docs/         In-depth documentation
 ## Maintenance
 
 - Run the public self-contained regressions after every change:
-  `python tests/test_p4.py` and `python tests/test_p5.py`. When the pilot
+  `python tests/test_p4.py` through `python tests/test_p7.py`. When the pilot
   repository and its local project profile are available, run the full local
   regression suite as well.
 - Increment `RESOLVER_VERSION` at the top of `resolve.py` whenever resolver

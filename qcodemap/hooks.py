@@ -142,6 +142,15 @@ class FactsHooks(object):
         """
         return []
 
+    def endpoint_aliases(self, tree, ctx):
+        """模块 AST -> [(line, endpoint, alias, confidence, reason), ...]。
+
+        endpoint 是实现侧类名，alias 是另一端或运行时暴露的等价端名。
+        声明字段、注册 API 等项目语法由 custom 解释；core 只把归一关系
+        用于 RPC endpoint 过滤和跨端路径，不认识原始框架词汇。
+        """
+        return []
+
     def project_diagnostics(self, store, cfg):
         """项目级诊断 -> [dict, ...]；core 只负责调用和包装结果。"""
         return []

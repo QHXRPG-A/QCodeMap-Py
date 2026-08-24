@@ -11,7 +11,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 DDL = '''
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS rpc_handler(
     file TEXT, line INT, chan TEXT, method TEXT, endpoint TEXT,
     confidence TEXT, reason TEXT);
 CREATE INDEX IF NOT EXISTS idx_rpc_handler_method ON rpc_handler(method);
+CREATE TABLE IF NOT EXISTS endpoint_alias(
+    file TEXT, line INT, endpoint TEXT, alias TEXT,
+    confidence TEXT, reason TEXT);
+CREATE INDEX IF NOT EXISTS idx_endpoint_alias_endpoint ON endpoint_alias(endpoint);
+CREATE INDEX IF NOT EXISTS idx_endpoint_alias_alias ON endpoint_alias(alias);
+CREATE INDEX IF NOT EXISTS idx_endpoint_alias_file ON endpoint_alias(file);
 CREATE TABLE IF NOT EXISTS pubsub(file TEXT, line INT, side TEXT, event TEXT, func TEXT, cls TEXT);
 CREATE INDEX IF NOT EXISTS idx_pubsub_event ON pubsub(event);
 CREATE INDEX IF NOT EXISTS idx_pubsub_file ON pubsub(file);
@@ -73,7 +79,8 @@ CREATE TABLE IF NOT EXISTS edges(
 # file 列直接存路径、可直接级联删除的表（names 走 file_id 单独处理）
 CASCADE_TABLES = ('defs', 'classes', 'imports', 'attr', 'global_assign',
                   'comp_raw', 'ret', 'rpc', 'receiver_fact', 'rpc_handler',
-                  'pubsub', 'callback_raw', 'ui_binding', 'binding')
+                  'endpoint_alias', 'pubsub', 'callback_raw', 'ui_binding',
+                  'binding')
 
 
 class Store(object):
@@ -177,8 +184,8 @@ class Store(object):
         # 其余事实表行 = 完整表行；列数以 DDL 为准，按首行宽度生成占位符
         for table in ('defs', 'classes', 'imports', 'attr',
                       'global_assign', 'ret', 'comp_raw', 'rpc',
-                      'receiver_fact', 'rpc_handler', 'pubsub', 'callback_raw',
-                      'ui_binding', 'binding'):
+                      'receiver_fact', 'rpc_handler', 'endpoint_alias',
+                      'pubsub', 'callback_raw', 'ui_binding', 'binding'):
             data = rows.get(table)
             if data:
                 marks = ','.join('?' * len(data[0]))

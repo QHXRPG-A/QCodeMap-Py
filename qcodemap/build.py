@@ -150,8 +150,8 @@ def collect_files(cfg):
 
 _ALL_TABLES = ('meta', 'files', 'names', 'defs', 'classes', 'imports', 'attr',
                'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'pubsub',
-               'receiver_fact', 'rpc_handler', 'callback_raw', 'ui_binding',
-               'binding', 'edges')
+               'receiver_fact', 'rpc_handler', 'endpoint_alias',
+               'callback_raw', 'ui_binding', 'binding', 'edges')
 
 
 def _prepare_rebuild(db_path):
@@ -368,7 +368,7 @@ def _build(cfg, rebuild=False, verbose=True, scope_rels=None, vacuum=False):
 def _drop_all(store):
     for table in ('files', 'names', 'defs', 'classes', 'imports', 'attr',
                   'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'pubsub',
-                  'receiver_fact', 'rpc_handler', 'callback_raw',
+                  'receiver_fact', 'rpc_handler', 'endpoint_alias', 'callback_raw',
                   'ui_binding', 'binding', 'edges'):
         store.con.execute('DELETE FROM %s' % table)
 

@@ -294,7 +294,7 @@ def main():
         if '只接受单个 Python 标识符' not in cli_out['note'] \
                 or 'index' not in cli_out:
             failed.append('CLI UTF-8/非法 usages/index 元数据失败: %s' % cli_out)
-        for command in ('callers', 'callees', 'usages', 'rpc-refs', 'deps',
+        for command in ('callers', 'callees', 'usages', 'rpc-refs', 'path', 'deps',
                         'hubs', 'tree', 'find', 'context', 'defs', 'diagnose'):
             help_text = subprocess.run(
                 base + [command, '--help'], cwd=PROJECT, env=env,

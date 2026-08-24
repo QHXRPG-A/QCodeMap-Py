@@ -18,6 +18,7 @@ from qcodemap import config as config_mod
 from qcodemap import context as ctx_mod
 from qcodemap import diagnostics as diagnostics_mod
 from qcodemap import freshness as freshness_mod
+from qcodemap import path_query as path_mod
 from qcodemap import pubsub_refs as pubsub_mod
 from qcodemap import resolve as rmod
 from qcodemap import rpc_refs as rpc_mod
@@ -109,8 +110,15 @@ def _tool_callers(args):
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store.open_reader(cfg.db_path)
     try:
-        out = rmod.callers(store, cfg, args['file'], args['func'],
-                           receiver_class=args.get('receiver_class'))
+        if args.get('symbol'):
+            out = rmod.callers_by_symbol(
+                store, cfg, args['symbol'],
+                receiver_class=args.get('receiver_class'))
+        elif args.get('file') and args.get('func'):
+            out = rmod.callers(store, cfg, args['file'], args['func'],
+                               receiver_class=args.get('receiver_class'))
+        else:
+            raise ValueError('callers 需要 symbol，或 file + func')
     finally:
         store.close()
     return freshness_mod.attach_index(out, index)
@@ -235,6 +243,21 @@ def _tool_rpc_refs(args):
     return freshness_mod.attach_index(out, index)
 
 
+def _tool_path(args):
+    cfg = config_mod.load_config()
+    index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
+    store = Store.open_reader(cfg.db_path)
+    try:
+        out = path_mod.path(
+            store, cfg, args['from'], args['to'],
+            max_depth=max(0, int(args.get('max_depth', 6))),
+            max_nodes=max(1, int(args.get('max_nodes', 2000))),
+            json_out=True)
+    finally:
+        store.close()
+    return freshness_mod.attach_index(out, index)
+
+
 def _tool_pubsub_refs(args):
     cfg = config_mod.load_config()
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
@@ -333,15 +356,20 @@ _TOOLS = [
     },
     {
         'name': 'qcodemap_callers',
-        'description': '谁调用这个函数（VERIFIED=语义验证边 / CANDIDATE=同名未验证）。',
+        'description': '谁调用这个函数；可直接传 symbol，唯一时自动定位，歧义时返回候选。',
         'inputSchema': {'type': 'object',
-                        'properties': {'file': {'type': 'string',
+                        'properties': {'symbol': {'type': 'string',
+                                                  'description': 'Func/Class.Func/'
+                                                                 'path.py:Class.Func'},
+                                       'file': {'type': 'string',
                                                 'description': '函数所在文件（相对项目根）'},
                                        'func': {'type': 'string'},
                                        'receiver_class': {
                                            'type': 'string',
                                            'description': '限定 receiver 类型证据'}},
-                        'required': ['file', 'func']},
+                        'required': [],
+                        'anyOf': [{'required': ['symbol']},
+                                  {'required': ['file', 'func']}]},
         'handler': _tool_callers,
     },
     {
@@ -432,6 +460,19 @@ _TOOLS = [
                                                                'stub 通道精确配对用）'}},
                         'required': ['method']},
         'handler': _tool_rpc_refs,
+    },
+    {
+        'name': 'qcodemap_path',
+        'description': '查询两个符号间跨普通调用和标准化 RPC 的最短路径。',
+        'inputSchema': {'type': 'object',
+                        'properties': {'from': {'type': 'string'},
+                                       'to': {'type': 'string'},
+                                       'max_depth': {'type': 'integer',
+                                                     'default': 6},
+                                       'max_nodes': {'type': 'integer',
+                                                     'default': 2000}},
+                        'required': ['from', 'to']},
+        'handler': _tool_path,
     },
     {
         'name': 'qcodemap_pubsub_refs',

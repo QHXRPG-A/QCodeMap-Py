@@ -35,16 +35,17 @@
 | `store.py` | SQLite 封装：DDL / reader-writer 隔离 / files 登记与级联删除 | reader 用只读 URI；writer 用 WAL；names.file 用 file_id |
 | `build.py` | 遍历 + mtime/profile 增量 + pass2 组件解析 | 跨进程单 writer 锁；partial targets 只清理范围内；大库并行 scan |
 | `resolve.py` | 两阶段语义验证 + callers/callees/usages + 约定回调 + edges 缓存 | 性能敏感区，见 §4 |
+| `path_query.py` | 符号消歧后跨普通调用/RPC 的最短路径 | 只消费通用定义、调用与 RPC 事实，不解释项目语法 |
 | `structure.py` | deps/importers/hubs/tree 结构四命令 | 纯 SQL + 内存 modmap，无 ast-grep；coverage 按 scope 内 parse_ok 给 partial |
 | `blast.py` | 变更影响面：变更集采集 + 调用链闭包 + 输出投影 | 完整计算后提供 summary/page/full；caller 按 layer、importers 独立分页 |
-| `rpc_refs.py` | RPC 双端配对查询：rpc 表调用点 + defs 表 handler | RPC-INFERRED/HANDLER 分级；stub 精确配对优先，方法名兜底 |
+| `rpc_refs.py` | RPC 双端配对查询：调用 + handler + 组件宿主 + endpoint alias | RPC-INFERRED/HANDLER 分级；stub 严格过滤并解释未命中 |
 | `pubsub_refs.py` | 事件双端配对查询：pubsub 表两侧事实 | EVENT-INFERRED/LISTENER 分级；裸事件名按后缀匹配分组（防跨端撞名） |
 | `ui_refs.py` | UI 资源绑定双向查询：ui_binding/binding 事实 × custom 资源库 | 声明关系可配 wrapper；EXACT/MULTI/MISS/INDIRECT/UNBOUND/PATTERN/DYNAMIC 分级；普通查询分页 |
 | `context.py` | agent 消费面三命令：find_file / get_file_context / context | 全查表无 ast 现扫；context 为一次性项目档案（qcodemap.context/v1） |
 | `freshness.py` | 查询前新鲜度契约 | auto/check/off；全仓文件集+mtime 增量刷新；配置/schema/hook 指纹不匹配拒绝旧结果 |
 | `fingerprint.py` | 索引指纹：custom 目录全部 .py 内容 + 配置/profile 哈希 | custom 词表改动即失效旧库，防用旧语义回答新问题 |
 | `diagnostics.py` | custom 项目诊断汇总 | 核心只聚合统一诊断事实，不识别项目框架 |
-| `mcp_server.py` | stdio JSON-RPC MCP server（17 工具） | 自举 UTF-8；日志一律 stderr；全查询 auto refresh，进程内 1 秒节流；ui-refs 工具描述由 custom profile 注入 |
+| `mcp_server.py` | stdio JSON-RPC MCP server（18 工具） | 自举 UTF-8；日志一律 stderr；全查询 auto refresh，进程内 1 秒节流；ui-refs 工具描述由 custom profile 注入 |
 | `custom/` | 项目定制层（config/facts/seeds/ui_profile/tbui_index 五件，仓库仅随附模板说明） | 见 CUSTOM_GUIDE |
 
 ## 3. 表结构（store.DDL）
@@ -66,6 +67,7 @@
 | `callback_raw` | custom 声明的通用约定回调：(file,line,class,kind,source,target) | 数千 |
 | `receiver_fact` | custom 提供的调用点 receiver 类型证据 | 按项目规则增长 |
 | `rpc_handler` | custom 提供的 RPC handler、方向、端点与证据等级 | 按项目规则增长 |
+| `endpoint_alias` | custom 归一的实现 endpoint 与跨端/运行时等价名 | 按项目规则增长 |
 | `edges` | 查询结果缓存（name+def+kind 主键，payload 含 mtimes 与版本） | 按查询增长 |
 | `meta` | schema 版本 / 构建统计 | - |
 
@@ -124,7 +126,8 @@ scope 为空的模块级导入。调用解析与 custom 钩子按调用点恢复
 
 ### 5.7 覆盖率契约（P4：失败不静默）
 scanner 把 ast 解析失败记为 files.parse_ok=0（事实降级仅保 names）。查询侧
-三处透出：resolve 的结果带 `coverage{status, parse_failed}`（全库口径）；
+三处透出：resolve 的结果带 `coverage{status, parse_failed, issues}`（全库状态，
+issues 只列查询相关坏文件）；
 structure 按 scope（deps/importers 的目标集）给 partial 并附 issues 文件
 清单；callers 对候选落在坏文件的边注明「所在文件 ast 解析失败」，agent
 可区分「索引残缺」与「语义歧义」。对齐 codemap 的 complete/partial 契约。
@@ -221,5 +224,6 @@ CLI 默认 full 保持旧行为；MCP 默认 summary。page 模式以 callers/im
 | `test_ui_refs.py` | ui_facts 提取 + tbui 展开 + 三视图配对 + audit（真实 custom 词表小样） | ~10s |
 | `test_p5.py` | partial targets、新鲜度、指纹、profile、receiver、RPC、诊断、UTF-8、blast hunk | ~6s |
 | `test_p6.py` | 只读 Store/WAL 快照、单 writer 锁、通用 binding、ui-refs 分页、core/custom 边界 | ~1s |
+| `test_p7.py` | 符号消歧、endpoint 宿主/别名、严格 RPC、混合路径、相关覆盖问题 | ~2s |
 
 动任何 qcodemap/ 代码后全部回归都跑；只动 custom/ 至少跑 feasibility、scale、p5。

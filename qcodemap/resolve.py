@@ -124,15 +124,17 @@ class Resolver(object):
         row = self._method_cache[mkey]
         if row:
             return row
+        # 注入组件在运行时成为宿主类的直接属性，优先级高于继承方法；
+        # core 只消费 comp 标准边，不解释装饰器或注册 API。
+        for comp, cf in self.comp_hosts.get((cls, cls_file), ()):
+            hit = self.mro_has_method(comp, cf, method, seen)
+            if hit:
+                return hit
         for b in self.class_bases(cls, cls_file):
             for bf in self._class_files(b, cls_file):
                 hit = self.mro_has_method(b, bf, method, seen)
                 if hit:
                     return hit
-        for comp, cf in self.comp_hosts.get((cls, cls_file), ()):
-            hit = self.mro_has_method(comp, cf, method, seen)
-            if hit:
-                return hit
         return None
 
     # ---- 解析主入口 ----
@@ -583,8 +585,10 @@ def _display(cls, func):
 #     mod.func() 调用从静默降级恢复为可验证；
 # v6: import 按词法作用域解析 + 钩子约定回调严格宿主连边；
 # v7: 约定回调边缓存纳入共同宿主文件 mtime；
-# v8: receiver/handler 事实并入解析；v9: receiver 经 MRO/组件归并目标
-RESOLVER_VERSION = 9
+# v8: receiver/handler 事实并入解析；v9: receiver 经 MRO/组件归并目标；
+# v10: 增加符号自动消歧/运行时宿主定义定位与查询相关覆盖问题清单；
+# v11: 运行时宿主的方法解析按直接定义 > 注入组件 > 基类
+RESOLVER_VERSION = 11
 
 
 # 内置函数/常见运行时名：callees 收集时的噪音过滤
@@ -597,7 +601,32 @@ _BUILTIN_NAMES = frozenset((
 ))
 
 
-def _result(query, items, t0, cached=False, note='', store=None):
+def coverage_details(store, relevant_files=None, symbols=None):
+    """查询相关 AST 覆盖率；列出受影响文件，而不只返回全库计数。"""
+    bad = store.parse_failed_files()
+    related = set(store.parse_failed_files(relevant_files or ()))
+    for symbol in symbols or ():
+        if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', symbol or ''):
+            continue
+        related.update(p for (p,) in store.con.execute(
+            'SELECT DISTINCT f.path FROM names n JOIN files f ON n.file=f.id '
+            'WHERE n.name=? AND f.parse_ok=0 ORDER BY f.path',
+            (symbol,)).fetchall())
+    issues = [{
+        'code': 'AST_PARSE_FAILED',
+        'file': rel,
+        'impact': '语义验证不可用；该文件仅有 names 倒排事实',
+    } for rel in sorted(related)]
+    return {
+        'status': 'partial' if bad else 'complete',
+        'parse_failed': len(bad),
+        'related_parse_failed': len(issues),
+        'issues': issues,
+    }
+
+
+def _result(query, items, t0, cached=False, note='', store=None,
+            relevant_files=None, coverage_symbols=None):
     out = {
         'query': query, 'items': items, 'cached': cached, 'note': note,
         'n_verified': sum(1 for i in items if i['level'] == 'VERIFIED'),
@@ -606,9 +635,8 @@ def _result(query, items, t0, cached=False, note='', store=None):
         'elapsed': round(time.time() - t0, 3),
     }
     if store is not None:
-        n_bad = store.parse_failed_count()
-        out['coverage'] = {'status': 'partial' if n_bad else 'complete',
-                           'parse_failed': n_bad}
+        out['coverage'] = coverage_details(
+            store, relevant_files=relevant_files, symbols=coverage_symbols)
     return out
 
 
@@ -663,6 +691,116 @@ def _find_defs(store, file, func):
         (file, func)).fetchall()
 
 
+def resolve_symbol(store, cfg, symbol):
+    """裸名/类限定名/文件限定名 -> 唯一定义或消歧候选。
+
+    支持 ``Func``、``Class.Func``、``path.py:Func`` 与
+    ``path.py:Class.Func``。类限定名还能沿通用继承/组件宿主图定位实际定义。
+    """
+    raw = (symbol or '').strip()
+    file_hint = None
+    symbol_part = raw
+    if ':' in raw:
+        maybe_file, maybe_symbol = raw.rsplit(':', 1)
+        if maybe_file.endswith('.py') or '/' in maybe_file or '\\' in maybe_file:
+            file_hint = maybe_file.replace('\\', '/')
+            symbol_part = maybe_symbol
+    parts = symbol_part.split('.') if symbol_part else []
+    if not parts or any(not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', p)
+                        for p in parts):
+        return {'symbol': raw, 'status': 'invalid', 'selected': None,
+                'candidates': [],
+                'note': '符号格式应为 Func、Class.Func 或 path.py:Class.Func'}
+    func = parts[-1]
+    requested_class = '.'.join(parts[:-1]) or None
+    params = [func]
+    sql = 'SELECT file,line,class FROM defs WHERE name=?'
+    if file_hint:
+        sql += ' AND file=?'
+        params.append(file_hint)
+    if requested_class:
+        class_name = requested_class.rsplit('.', 1)[-1]
+        sql += ' AND class=?'
+        params.append(class_name)
+    rows = store.con.execute(sql + ' ORDER BY file,line', params).fetchall()
+    candidates = []
+    for file, line, cls in rows:
+        candidates.append({
+            'file': file, 'line': line, 'class': cls, 'name': func,
+            'symbol': _display(cls, func), 'via': 'definition',
+        })
+
+    # 宿主类本身没有物理 def 时，沿通用 MRO/组件图找实际实现。
+    if requested_class and cfg is not None:
+        r = Resolver(store, cfg)
+        host_class = requested_class.rsplit('.', 1)[-1]
+        host_files = r._class_files(host_class, file_hint)
+        if file_hint:
+            host_files = [f for f in host_files if f == file_hint]
+        for host_file in host_files:
+            hit = r.mro_has_method(host_class, host_file, func)
+            if not hit:
+                continue
+            row = store.con.execute(
+                'SELECT class FROM defs WHERE file=? AND line=?', hit).fetchone()
+            candidates.append({
+                'file': hit[0], 'line': hit[1],
+                'class': row[0] if row else None, 'name': func,
+                'symbol': _display(row[0] if row else None, func),
+                'via': 'runtime-host',
+                'requested_class': host_class,
+                'host_file': host_file,
+            })
+
+    unique = {}
+    for item in candidates:
+        key = (item['file'], item['line'])
+        old = unique.get(key)
+        if old is None or old.get('via') != 'definition':
+            unique[key] = item
+    candidates = sorted(unique.values(), key=lambda i: (i['file'], i['line']))
+    if len(candidates) == 1:
+        status = 'resolved'
+        selected = candidates[0]
+        note = ''
+    elif candidates:
+        status = 'ambiguous'
+        selected = None
+        note = ('命中 %d 个定义；请改用 Class.Func 或 '
+                'path.py:Class.Func 消歧' % len(candidates))
+    else:
+        status = 'not-found'
+        selected = None
+        note = '未找到符号定义'
+    return {'symbol': raw, 'status': status, 'selected': selected,
+            'candidates': candidates, 'note': note}
+
+
+def callers_by_symbol(store, cfg, symbol, receiver_class=None):
+    """callers 的符号便捷入口：唯一时自动定位，歧义时返回候选。"""
+    t0 = time.time()
+    resolution = resolve_symbol(store, cfg, symbol)
+    selected = resolution['selected']
+    if selected is not None:
+        out = callers(store, cfg, selected['file'], selected['name'],
+                      receiver_class=receiver_class)
+        out['query'] = {'symbol': symbol, 'receiver_class': receiver_class}
+        out['resolution'] = resolution
+        return out
+    items = [{
+        'level': 'DISAMBIGUATION', 'symbol': item['symbol'],
+        'file': item['file'], 'line': item['line'],
+        'caller': item['symbol'], 'note': item.get('via'),
+    } for item in resolution['candidates']]
+    out = _result({'symbol': symbol, 'receiver_class': receiver_class}, items,
+                  t0, note=resolution['note'], store=store,
+                  relevant_files=[i['file'] for i in resolution['candidates']],
+                  coverage_symbols=[selected['name'] if selected else
+                                    symbol.rsplit('.', 1)[-1]])
+    out['resolution'] = resolution
+    return out
+
+
 def _is_call_form(resolver, rel, line, name):
     """names 候选行是否呈调用形态（token 后最近字符为 '('）。"""
     try:
@@ -712,6 +850,7 @@ def callers(store, cfg, file, func, resolver=None, receiver_class=None):
     resolver 可注入复用（blast 闭包逐函数调用时避免重复全表初始化）。
     """
     t0 = time.time()
+    file = file.replace('\\', '/')
     defs = _find_defs(store, file, func)
     if receiver_class:
         defs = [row for row in defs if row[2] == receiver_class]
@@ -722,14 +861,18 @@ def callers(store, cfg, file, func, resolver=None, receiver_class=None):
             (file.replace('\\', '/'),)).fetchone()
         if row is not None and not row[0]:
             note = '定义未找到：目标文件 ast 解析失败，索引仅 names'
-        return _result({'file': file, 'func': func}, [], t0, note=note, store=store)
+        return _result({'file': file, 'func': func}, [], t0, note=note,
+                       store=store, relevant_files=[file],
+                       coverage_symbols=[func])
     def_file, def_line, def_cls = defs[0]
     note = ('同名定义 %d 处，取首处' % len(defs)) if len(defs) > 1 else ''
     cache_kind = 'callers:%s' % (receiver_class or '')
     cached = _load_edges(store, cfg, func, def_file, def_line, cache_kind)
     if cached is not None:
         return _result({'file': file, 'func': func}, cached, t0, cached=True,
-                       note=note, store=store)
+                       note=note, store=store,
+                       relevant_files=[i['file'] for i in cached] + [def_file],
+                       coverage_symbols=[func])
     r = resolver or Resolver(store, cfg)
     items = []
     bad_files = set(store.parse_failed_files())
@@ -792,23 +935,28 @@ def callers(store, cfg, file, func, resolver=None, receiver_class=None):
     _save_edges(store, func, def_file, def_line, cache_kind, items, ref_files)
     return _result({'file': file, 'func': func,
                     'receiver_class': receiver_class}, items, t0,
-                   note=note, store=store)
+                   note=note, store=store, relevant_files=ref_files,
+                   coverage_symbols=[func])
 
 
-def callees(store, cfg, file, func):
+def callees(store, cfg, file, func, def_line=None, resolver=None):
     """<file> 的 <func> 调了谁：定位函数体 -> 收集调用点 -> 逐个反向解析。"""
     t0 = time.time()
     file = file.replace('\\', '/')
     defs = _find_defs(store, file, func)
+    if def_line is not None:
+        defs = [row for row in defs if row[1] == def_line]
     if not defs:
         note = '定义未找到（文件未索引或函数不存在）'
         row = store.con.execute(
             'SELECT parse_ok FROM files WHERE path=?', (file,)).fetchone()
         if row is not None and not row[0]:
             note = '定义未找到：目标文件 ast 解析失败，索引仅 names'
-        return _result({'file': file, 'func': func}, [], t0, note=note, store=store)
+        return _result({'file': file, 'func': func}, [], t0, note=note,
+                       store=store, relevant_files=[file],
+                       coverage_symbols=[func])
     def_file, def_line, def_cls = defs[0]
-    r = Resolver(store, cfg)
+    r = resolver or Resolver(store, cfg)
     tree = r._parse(def_file)
     items = []
     if tree is not None:
@@ -871,7 +1019,10 @@ def callees(store, cfg, file, func):
                               'caller': '%s:%d' % (def_file, call.lineno)})
     note = ('同名定义 %d 处，取首处' % len(defs)) if len(defs) > 1 else ''
     items.sort(key=lambda i: (i['level'], i['symbol']))
-    return _result({'file': file, 'func': func}, items, t0, note=note, store=store)
+    return _result({'file': file, 'func': func}, items, t0, note=note,
+                   store=store,
+                   relevant_files=[def_file] + [i['file'] for i in items],
+                   coverage_symbols=[func])
 
 
 def usages(store, cfg, symbol, limit=200):
@@ -881,7 +1032,7 @@ def usages(store, cfg, symbol, limit=200):
         return _result(
             {'symbol': symbol}, [], t0,
             note='usages 只接受单个 Python 标识符；查类定义请用 defs X，'
-                 '搜文本请用 rg', store=store)
+                 '搜文本请用 rg', store=store, coverage_symbols=[symbol])
     rows = store.con.execute(
         'SELECT f.path, n.line, n.col FROM names n JOIN files f ON n.file=f.id '
         'WHERE n.name=? ORDER BY f.path, n.line LIMIT ?', (symbol, limit + 1)).fetchall()
@@ -896,7 +1047,9 @@ def usages(store, cfg, symbol, limit=200):
                                 ' …' if len(defs) > 5 else '')
     if has_more:
         note += '；出现点超 %d 截断' % limit
-    return _result({'symbol': symbol}, items, t0, note=note, store=store)
+    return _result({'symbol': symbol}, items, t0, note=note, store=store,
+                   relevant_files=[i['file'] for i in items],
+                   coverage_symbols=[symbol])
 
 
 def defs(store, symbol, limit=200):
@@ -904,7 +1057,8 @@ def defs(store, symbol, limit=200):
     t0 = time.time()
     if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', symbol):
         return _result({'symbol': symbol}, [], t0,
-                       note='defs 只接受单个 Python 标识符', store=store)
+                       note='defs 只接受单个 Python 标识符', store=store,
+                       coverage_symbols=[symbol])
     rows = store.con.execute(
         'SELECT file,line,class FROM defs WHERE name=? ORDER BY file,line LIMIT ?',
         (symbol, limit)).fetchall()
@@ -912,4 +1066,6 @@ def defs(store, symbol, limit=200):
         {'level': 'DEFINITION', 'symbol': _display(cls, symbol),
          'file': file, 'line': line, 'caller': _display(cls, symbol)}
         for file, line, cls in rows]
-    return _result({'symbol': symbol}, items, t0, store=store)
+    return _result({'symbol': symbol}, items, t0, store=store,
+                   relevant_files=[i['file'] for i in items],
+                   coverage_symbols=[symbol])
