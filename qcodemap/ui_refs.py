@@ -57,6 +57,8 @@ class _NoProfile(object):
     declaration_resource_relation = ''
     declaration_wrapper_relation = ''
     declaration_level = 'DECLARED'
+    field_read_relation = ''
+    table_read_level = 'TABLE-READ'
     base_stops = frozenset()
     wrapper_node_types = ()
     kind_labels = {}
@@ -659,6 +661,25 @@ def _file_view(store, profile, cfg, res, name):
                     items.append({'level': 'BIND_INHERIT', 'key': key,
                                   'file': f, 'line': ln, 'caller': sub,
                                   'note': '继承自 %s 使用该资源' % cls})
+    # 表驱动消费点：数据表字段声明（relation='resource'）按 owner join
+    # 运行时读取行（relation='field_read'），得到「该资源经哪个表字段、
+    # 被哪些加载点消费」的完整链路
+    field_read_relation = getattr(profile, 'field_read_relation', '')
+    table_read_level = getattr(profile, 'table_read_level', 'TABLE-READ')
+    if field_read_relation and declaration_domain and resource_relation:
+        for f, ln, owner, variant, confidence, reason in store.con.execute(
+                'SELECT rd.file, rd.line, rd.owner, rd.variant, '
+                'rd.confidence, rd.reason '
+                'FROM binding d JOIN binding rd '
+                'ON rd.domain=d.domain AND rd.owner=d.owner '
+                'WHERE d.domain=? AND d.relation=? AND d.target=? '
+                'AND rd.relation=? ORDER BY rd.file, rd.line',
+                (declaration_domain, resource_relation, name,
+                 field_read_relation)):
+            items.append({'level': table_read_level, 'key': name,
+                          'file': f, 'line': ln, 'caller': owner,
+                          'owner': owner, 'variant': variant,
+                          'confidence': confidence, 'note': reason})
     if res is not None:
         if not profile.adapter.has_file(res, name):
             items.append({'level': 'RES-MISS', 'key': name,
@@ -771,11 +792,21 @@ def ui_refs(store, cfg, name=None, kind=None, py_file=None, json_out=True,
         declaration_domain = getattr(profile, 'declaration_domain', '')
         if declaration_domain:
             declaration_level = getattr(profile, 'declaration_level', 'DECLARED')
+            # 表驱动字段读取行由下方 field_read 通道渲染（带资源键还原），
+            # 声明通道跳过避免同站点双行
+            field_read_relation = getattr(profile, 'field_read_relation', '')
+            table_read_level = getattr(profile, 'table_read_level', 'TABLE-READ')
+            resource_relation = getattr(
+                profile, 'declaration_resource_relation', '')
+            skip_rel = ('AND relation != ?' if field_read_relation else '')
+            decl_params = [py_file, declaration_domain]
+            if field_read_relation:
+                decl_params.append(field_read_relation)
             for ln, owner, relation, target, variant, confidence, reason in \
                     store.con.execute(
                         'SELECT line,owner,relation,target,variant,confidence,reason '
-                        'FROM binding WHERE file=? AND domain=? ORDER BY line,relation',
-                        (py_file, declaration_domain)):
+                        'FROM binding WHERE file=? AND domain=? ' + skip_rel +
+                        ' ORDER BY line,relation', decl_params):
                 items.append({
                     'level': declaration_level,
                     'key': target, 'file': py_file, 'line': ln,
@@ -783,6 +814,27 @@ def ui_refs(store, cfg, name=None, kind=None, py_file=None, json_out=True,
                     'relation': relation, 'variant': variant,
                     'confidence': confidence, 'note': reason,
                 })
+            if field_read_relation:
+                for ln, owner, variant, confidence, reason, targets in \
+                        store.con.execute(
+                            'SELECT rd.line, rd.owner, rd.variant, '
+                            'rd.confidence, rd.reason, '
+                            'GROUP_CONCAT(d.target) FROM binding rd '
+                            'LEFT JOIN binding d ON d.domain=rd.domain '
+                            'AND d.owner=rd.owner AND d.relation=? '
+                            'WHERE rd.file=? AND rd.domain=? AND rd.relation=? '
+                            'GROUP BY rd.line, rd.owner ORDER BY rd.line',
+                            (resource_relation, py_file, declaration_domain,
+                             field_read_relation)):
+                    keys = sorted(set(targets.split(','))) if targets else []
+                    items.append({
+                        'level': table_read_level, 'key': owner,
+                        'file': py_file, 'line': ln, 'caller': owner,
+                        'owner': owner, 'variant': variant,
+                        'confidence': confidence,
+                        'match': keys or None,
+                        'note': reason or '表字段无资源声明，未参与配对',
+                    })
     elif kind == 'anim' and profile.anim_play_kind:
         view = 'anim'
         items, total = _anim_view(
@@ -911,6 +963,18 @@ def ui_audit(store, cfg, json_out=True, miss_cap=100):
                 res_missing.append(key)
 
     n_sites = sum(tally.values())
+    # 表驱动字段读取规模（扫描期提取、build_done 已修剪至有资源声明的字段）
+    table_driven = {}
+    field_read_relation = getattr(profile, 'field_read_relation', '')
+    declaration_domain = getattr(profile, 'declaration_domain', '')
+    if field_read_relation and declaration_domain:
+        table_driven['n_reads'] = store.con.execute(
+            'SELECT COUNT(*) FROM binding WHERE domain=? AND relation=?',
+            (declaration_domain, field_read_relation)).fetchone()[0]
+        table_driven['n_fields'] = store.con.execute(
+            'SELECT COUNT(DISTINCT owner) FROM binding '
+            'WHERE domain=? AND relation=?',
+            (declaration_domain, field_read_relation)).fetchone()[0]
     out = {
         'schema_version': 'qcodemap.ui-audit/v1',
         'resource_index': 'ok' if res is not None else 'unavailable',
@@ -923,6 +987,7 @@ def ui_audit(store, cfg, json_out=True, miss_cap=100):
         'type_mismatch': type_mismatch,
         'miss': miss_list,
         'dynamic': dynamic_list,
+        'table_driven': table_driven,
         'miss_cap': miss_cap,
         'elapsed': round(time.time() - t0, 3),
     }
@@ -936,6 +1001,9 @@ def ui_audit(store, cfg, json_out=True, miss_cap=100):
         n_anim, n_anim_attr, len(anim_miss)))
     lines.append('  UNBOUND 类 %d 个；RES-MISS %d 个；TYPE-MISMATCH %d 条'
                  % (len(unbound_classes), len(res_missing), len(type_mismatch)))
+    if out['table_driven']:
+        lines.append('  表驱动字段读取 %d 处（%d 个字段）' % (
+            out['table_driven']['n_reads'], out['table_driven']['n_fields']))
     for m in miss_list[:20]:
         lines.append('  [MISS] %s  %s:%s  (%s)' % (
             m['node'], m['file'], m['line'], m['caller']))

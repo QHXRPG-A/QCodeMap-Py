@@ -32,6 +32,7 @@ tests/test_structure.py
 tests/test_blast.py
 tests/test_mcp.py
 tests/test_ui_refs.py
+tests/test_table_csb.py
 tests/original/
 
 # IDE / 系统

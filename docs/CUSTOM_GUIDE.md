@@ -332,6 +332,14 @@ rows = store.con.execute(
 通过 `declaration_level` 显示为 `TABLE-BOUND` 等标签。字段名、大小变体回退、
 默认 wrapper 都必须在 custom 解释，禁止写进 `qcodemap/`。
 
+字段值指向资源的表还可声明双向配对：供给侧在数据表明文产物的 Dict 字面量里
+抽取「字段 -> 资源键」声明行（relation=`resource`）；消费侧在运行时代码识别
+表容器派生对象上的 `['字段']` / `.get('字段')` 读取（relation=`field_read`，
+profile.`field_read_relation`）。两侧按 owner=`<逻辑表>.<字段>` join——join
+键必须含表名，同名字段跨表才不串线。查询期 core 按 owner 连接两侧行：资源
+视图列出消费点（`table_read_level` 标签，默认 `TABLE-READ`），文件视图经
+左连声明还原资源键。表 glob、模块前缀、容器属性等全部是 custom 词汇。
+
 profile（custom/ui_profile.py 的 `Profile` 类）向 core 注入词汇：kind 分组
 （class_bind/node/pattern/dynamic/load/anim/item/wrapper）、寻访 attr 集、
 锚点 receiver、资源适配器（roots/named/descend/has_timeline，LIKE 参数

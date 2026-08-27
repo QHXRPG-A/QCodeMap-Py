@@ -5,4 +5,4 @@
 全部放在平级的 custom/ 目录，见 custom/config.py 头部说明。
 """
 
-__version__ = '0.10.0'
+__version__ = '0.11.0'
