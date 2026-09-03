@@ -52,6 +52,14 @@ class FactsHooks(object):
         """
         return []
 
+    def method_alias_facts(self, cd, ctx):
+        """ClassDef -> [(source, runtime, confidence, reason), ...]。
+
+        source 是源码中的物理方法名，runtime 是框架改写后的运行时名称。
+        core 保留物理定义身份，并在运行时 MRO 查询时使用别名。
+        """
+        return []
+
     def module_bindings(self, tree, ctx):
         """模块 AST -> 声明关系事实。
 
@@ -125,6 +133,14 @@ class FactsHooks(object):
         """
         return []
 
+    def call_callback_facts(self, call, ctx):
+        """函数体内注册调用 -> [(kind, source, target), ...]。
+
+        用于 timer/partial 等把绑定方法作为参数注册的动态回调。source 通常
+        是当前函数名，target 是绑定方法名；core 不硬编码注册 API。
+        """
+        return []
+
     def receiver_type_facts(self, call, ctx):
         """调用表达式 -> [(expr, type, confidence, reason), ...]。
 
@@ -133,6 +149,22 @@ class FactsHooks(object):
         证据应由 custom 在这里归一，core 不识别任何框架 API。
         """
         return []
+
+    def expand_receiver_type(self, typ, store, cfg, from_file):
+        """查询期展开项目伪类型 -> [(type, confidence, reason), ...]。
+
+        未识别时返回 []，core 继续把 typ 当普通类名处理。store/cfg 只供
+        custom 查询已标准化事实；项目语法仍不进入 core。
+        """
+        return []
+
+    def file_partition(self, rel):
+        """相对路径 -> 解析域名或 None。
+
+        同域可自动消歧；不同非空域默认隔离。显式 import、组件和继承关系
+        仍可建立合法跨域边。
+        """
+        return None
 
     def handler_facts(self, fn, ctx):
         """函数定义 -> [(chan, method, endpoint, confidence, reason), ...]。

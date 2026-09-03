@@ -59,7 +59,8 @@
 | `attr` | 属性类型事实：Property 声明（含第二参数类型）+ self.X=构造 | 数万 |
 | `global_assign` | 运行时全局注入：genv.X = self → (base, attr, class) | 数百 |
 | `ret` | 返回类型事实：return 构造()（module/class.method 两个命名空间） | 数千 |
-| `comp_raw` / `comp` | 组件注入原始行 / 精确 (host,host_file)↔(comp,comp_file) 边 | 3739/3962 |
+| `comp_raw` / `comp` | 带稳定 position 的组件注入原始行 / 精确有序宿主边 | 依项目增长 |
+| `method_alias` | 源码物理方法名与框架运行时方法名映射，保留 class/file/line 身份 | 依项目增长 |
 | `rpc` | 字符串分发 RPC 调用点：(file, line, chan, method, stub)，stub 可 NULL | 数千（见附录 F） |
 | `pubsub` | 事件分发两侧事实：(file, line, side, event, func, cls)，event 是 import 归一的常量键 | 数千（见附录 G） |
 | `ui_binding` | custom 声明的资源绑定事实：(file,line,class,kind,key,receiver,wrapper,...)，kind 对 core 不透明 | 5.7 万（SEEK 族为主） |
@@ -93,17 +94,16 @@
 `.pyi` 受 Python 模块解析规则约束必须与源码同目录（镜像目录桩实测 0 生效），
 无法与源码分离。数据化进 SQLite 后约束消失，同目录规则不再适用。
 
-### 5.2 同名类并集语义（不是消歧后取一）
-`_class_files` 返回**全部**定义文件，排序「同文件 > 同目录 > 同顶层 target
-（镜像目录下的同名类场景）> 字典序」，方法查找沿排序依次尝试。
-依据：@Components 是 setattr 拷贝，宿主方法来自每一个组件类；
-客户端/服务端两侧的同名 Avatar 类是镜像实现，调用方语境决定用哪份。
-历史教训：早期版本消歧失败返回 None，GetTeammateInfo 的 VERIFIED 边
-从 21 掉到 6。
+### 5.2 有序组件、精确基类与解析分区
+`comp_raw/comp` 保留装饰器展开顺序。运行时查找按「后注入组件优先，再查
+宿主直接定义和基类」执行，匹配逐次 `setattr` 的覆盖语义；组件方法里的
+`self.X()` 还会经反向共同宿主解析。基类不再遍历同名类全集，而按同文件、
+显式 import、唯一近邻消歧。custom 可用 `file_partition` 声明 client/server
+等解析域；不同非空域默认隔离，显式 import、组件和继承边仍可合法跨域。
 
 ### 5.3 零误报优先于高召回
-解析不了的边降级 CANDIDATE 并注明「解析到同名另一定义 X:Y」——这个注明
-本身就是信息（如 HasSkywingForPara 基类版/子类重写版的区分）。
+解析不了且仍可能命中目标的边降级 CANDIDATE。已经解析到另一定义、分区
+不兼容或共同运行时宿主不相交的同名调用直接排除，不再制造限定查询噪声。
 
 ### 5.4 RESOLVER_VERSION 缓存失效
 edges 缓存键含解析器行为版本（resolve.py 内 RESOLVER_VERSION 常量）。任何影响边判定结果的
@@ -176,15 +176,24 @@ receiver（裸名 Publish(x.Y) 防误报）。嵌套 def 双访问按
 标注）。已知边界：变量首参（全库约 3 处）不做属性回溯；模块级语句里的
 pubsub 调用不采集（与 rpc 口径一致）。
 
-### 5.11 通用约定回调与 Property custom 规则
+### 5.11 通用约定回调、运行时别名与 receiver 展开
 
-core 提供 `callback_facts(stmt, ctx) -> [(kind, source, target)]` 协议及
-callback_raw 存储，不认识 Property 或 `_on_set_`。孵化案例只在
+core 提供 `callback_facts(stmt, ctx)` 与 `call_callback_facts(call, ctx)`
+协议及 callback_raw 存储，分别覆盖声明式回调和函数体内注册回调；timer、
+partial 等具体 API 仍由 custom 白名单解释。回调边进入 callers、callees、
+path 与 blast-radius，并按 kind 输出 `*-INFERRED`。core 不认识 Property
+或 `_on_set_`。孵化案例只在
 custom/facts.py 把 `Property("x", ...)` 映射为
 `('PROPERTY', 'x', '_on_set_x')`。resolver 对声明类和目标方法类分别求
 同类、反向继承、精确 @Components 注入的运行时宿主闭包；交集非空才返回
 `PROPERTY-INFERRED`，并附 host class/file 证据。blast 对变更声明把目标回调
 列为第一层 `via_callback` 影响。
+
+`method_alias_facts` 把源码物理方法映射到框架改写后的运行时名称；resolver
+以物理 file/line 为节点，并保留 source/runtime name，避免装饰器改名后丢失
+定义身份。`receiver_type_facts` 可先落伪类型，再由查询期
+`expand_receiver_type` 结合 binding 事实展开到具体宿主；这类边输出
+`FRAMEWORK-INFERRED`，可被 path 遍历但不冒充纯 AST 直证。
 
 ### 5.12 blast 输出投影
 
@@ -215,7 +224,7 @@ CLI 默认 full 保持旧行为；MCP 默认 summary。page 模式以 callers/im
 | `test_scale.py` | 全库规模/查询/缓存指标，文件数 ±1% 容差 | 增量秒级（--rebuild 全量） |
 | `test_structure.py` | 四命令输出正确性 + hubs 锚点方向 | ~1s |
 | `test_blast.py` | 闭包命中已知边（--files 模式，不依赖 svn） | 秒级（缓存热后） |
-| `test_mcp.py` | 进程内协议全流程（17 工具）+ 真子进程冒烟 | ~10s |
+| `test_mcp.py` | 进程内协议全流程（18 工具）+ 真子进程冒烟 | ~10s |
 | `test_p4.py` | 覆盖率契约 + 三新命令 + 懒刷新（临时小库自建） | ~2s |
 | `test_rpc.py` | RPC 分发提取 + rpc-refs 配对 + blast 穿透（临时小库） | ~2s |
 | `test_pubsub.py` | pubsub 双端提取 + 事件归一 join + blast 穿透（临时小库） | ~2s |
@@ -225,5 +234,6 @@ CLI 默认 full 保持旧行为；MCP 默认 summary。page 模式以 callers/im
 | `test_p5.py` | partial targets、新鲜度、指纹、profile、receiver、RPC、诊断、UTF-8、blast hunk | ~6s |
 | `test_p6.py` | 只读 Store/WAL 快照、单 writer 锁、通用 binding、ui-refs 分页、core/custom 边界 | ~1s |
 | `test_p7.py` | 符号消歧、endpoint 宿主/别名、严格 RPC、混合路径、相关覆盖问题 | ~2s |
+| `test_p8.py` | 有序组件、方法别名、注册回调、伪类型展开、分区、统一符号接口 | ~2s |
 
 动任何 qcodemap/ 代码后全部回归都跑；只动 custom/ 至少跑 feasibility、scale、p5。

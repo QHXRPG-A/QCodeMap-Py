@@ -99,6 +99,7 @@ def scan_file(rel, path, hooks=None, downsample=False, profile='full'):
     text = read_source(path)
     r = {'names': [], 'defs': [], 'classes': [], 'imports': [],
          'attr': [], 'global_assign': [], 'ret': [], 'comp_raw': [],
+         'method_alias': [],
          'rpc': [], 'receiver_fact': [], 'rpc_handler': [], 'pubsub': [],
          'endpoint_alias': [], 'callback_raw': [], 'ui_binding': [],
          'binding': [], 'parse_ok': True}
@@ -356,8 +357,18 @@ def _scan_class(cd, r, rel, mod, hooks, imp_map, func_imp_maps, scope_keys):
     cctx = FactContext(rel, mod, cd.name)
     bases = [dotted(b) for b in cd.bases if not isinstance(b, ast.Starred)]
     r['classes'].append((rel, cd.name, ','.join(b for b in bases if b), cd.lineno))
+    comp_position = 0
     for row in hooks.class_facts(cd, cctx):
-        r[row[0]].append(row[1])
+        table, values = row
+        if table == 'comp_raw' and len(values) == 4:
+            values = values[:2] + (comp_position,) + values[2:]
+            comp_position += 1
+        elif table == 'comp_raw' and len(values) == 5:
+            comp_position = max(comp_position, int(values[2]) + 1)
+        r[table].append(values)
+    for source, runtime, confidence, reason in hooks.method_alias_facts(cd, cctx):
+        r['method_alias'].append(
+            (rel, cd.name, source, runtime, confidence, reason))
     # 约定回调只接受类体声明，不把方法里的同形调用误当声明。
     for sub in _class_stmts(cd):
         for kind, source, target in hooks.callback_facts(sub, cctx):
@@ -448,6 +459,9 @@ def _scan_function(fn, r, rel, mod, cls, hooks, imp_map=None,
             if t not in BUILTIN_CTORS:
                 r['ret'].append((mod, func_key, t, rel))
         elif isinstance(node, ast.Call):
+            for kind, source, target in hooks.call_callback_facts(node, fctx):
+                r['callback_raw'].append(
+                    (rel, node.lineno, cls, kind, source, target))
             for (chan, method, stub) in hooks.rpc_facts(node, fctx):
                 r['rpc'].append((rel, node.lineno, chan, method, stub))
             for expr, typ, confidence, reason in hooks.receiver_type_facts(node, fctx):

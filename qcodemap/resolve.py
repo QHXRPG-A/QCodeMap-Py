@@ -42,10 +42,19 @@ class Resolver(object):
             self.attr_facts[(cls, attr)] = t
         self.comp_hosts = {}
         self.reverse_components = {}
-        for (h, hf, c, cf) in self.con.execute(
-                'SELECT host, host_file, comp, comp_file FROM comp'):
-            self.comp_hosts.setdefault((h, hf), set()).add((c, cf))
+        for (h, hf, c, cf, position) in self.con.execute(
+                'SELECT host, host_file, comp, comp_file, position FROM comp '
+                'ORDER BY host_file, host, position'):
+            self.comp_hosts.setdefault((h, hf), []).append((c, cf, position))
             self.reverse_components.setdefault((c, cf), set()).add((h, hf))
+        self.method_aliases = {}
+        self.method_alias_sources = set()
+        for file, cls, source, runtime, confidence, reason in self.con.execute(
+                'SELECT file,class,source,runtime,confidence,reason '
+                'FROM method_alias'):
+            self.method_aliases[(cls, file, runtime)] = (
+                source, confidence, reason)
+            self.method_alias_sources.add((cls, file, source))
         # 模块映射基于全部已索引文件：纯模块（无类）项目里 mod.func() 调用
         # 也要能解析；旧版仅取含类文件的映射在这种项目上整链路静默降级
         self.modmap = {module_of(f): f for (f,) in
@@ -57,6 +66,7 @@ class Resolver(object):
         self._cfiles_cache = {}
         self._method_cache = {}
         self._runtime_hosts_cache = {}
+        self._partition_cache = {}
 
     # ---- 基础查表 ----
 
@@ -87,6 +97,10 @@ class Resolver(object):
             return self._cfiles_cache[ckey]
         rows = [r[0] for r in self.con.execute(
             'SELECT file FROM classes WHERE name=? ORDER BY file', (cls,)).fetchall()]
+        if from_file:
+            rows = [rel for rel in rows
+                    if self._partition_compatible(from_file, rel)
+                    or self._explicit_file_reference(from_file, rel)]
         if from_file and len(rows) > 1:
             def rank(rel):
                 if rel == from_file:
@@ -102,6 +116,51 @@ class Resolver(object):
         self._cfiles_cache[ckey] = rows
         return rows
 
+    def _partition(self, rel):
+        if not rel:
+            return None
+        if rel not in self._partition_cache:
+            hooks = getattr(self.cfg, 'hooks', None)
+            self._partition_cache[rel] = (
+                hooks.file_partition(rel) if hooks is not None else None)
+        return self._partition_cache[rel]
+
+    def _partition_compatible(self, left, right):
+        left_part = self._partition(left)
+        right_part = self._partition(right)
+        return not left_part or not right_part or left_part == right_part
+
+    def _explicit_file_reference(self, from_file, target_file):
+        """不同分区只有源码显式 import 时才参与自动类名消歧。"""
+        target_mod = module_of(target_file)
+        for module, name, _alias in self._imports_of(from_file):
+            imported = '%s.%s' % (module, name) if name else module
+            if target_mod in (module, imported):
+                return True
+        return False
+
+    def _base_class_files(self, base, child_file):
+        """基类引用按同文件/显式 import/唯一近邻消歧，禁止遍历同名全集。"""
+        base_name = base.rsplit('.', 1)[-1]
+        candidates = self._class_files(base_name, child_file)
+        if child_file in candidates:
+            return [child_file]
+        explicit = [file for file in candidates
+                    if self._explicit_file_reference(child_file, file)]
+        if explicit:
+            return explicit
+        child_dir = child_file.rsplit('/', 1)[0] if '/' in child_file else ''
+        same_dir = [file for file in candidates
+                    if (file.rsplit('/', 1)[0] if '/' in file else '') == child_dir]
+        if len(same_dir) == 1:
+            return same_dir
+        child_top = child_file.split('/', 1)[0]
+        same_top = [file for file in candidates
+                    if file.split('/', 1)[0] == child_top]
+        if len(same_top) == 1:
+            return same_top
+        return candidates if len(candidates) == 1 else []
+
     def _ret_fact(self, key):
         # 人工种子优先（可覆盖自动事实），见 custom/seeds.py
         return self.ret_seeds.get(key) or self.ret_facts.get(key)
@@ -116,23 +175,31 @@ class Resolver(object):
         if (cls, cls_file) in seen:
             return None
         seen.add((cls, cls_file))
-        mkey = (cls, cls_file, method)
-        if mkey not in self._method_cache:
-            self._method_cache[mkey] = self.con.execute(
-                'SELECT file,line FROM defs WHERE class=? AND name=? AND file=?',
-                (cls, method, cls_file)).fetchone()
-        row = self._method_cache[mkey]
-        if row:
-            return row
-        # 注入组件在运行时成为宿主类的直接属性，优先级高于继承方法；
-        # core 只消费 comp 标准边，不解释装饰器或注册 API。
-        for comp, cf in self.comp_hosts.get((cls, cls_file), ()):
+        # Components 按装饰器参数顺序 setattr；后注入组件覆盖先注入组件，
+        # 并覆盖宿主自身同名属性。core 只消费有序 comp 标准边。
+        for comp, cf, _position in reversed(
+                self.comp_hosts.get((cls, cls_file), ())):
             hit = self.mro_has_method(comp, cf, method, seen)
             if hit:
                 return hit
+        alias = self.method_aliases.get((cls, cls_file, method))
+        source = alias[0] if alias else method
+        mkey = (cls, cls_file, source, method)
+        if mkey not in self._method_cache:
+            if alias or (cls, cls_file, method) not in self.method_alias_sources:
+                self._method_cache[mkey] = self.con.execute(
+                    'SELECT file,line FROM defs WHERE class=? AND name=? AND file=?',
+                    (cls, source, cls_file)).fetchone()
+            else:
+                # StateWrapper 等已删除原运行时名字；物理 def 只供源码定位。
+                self._method_cache[mkey] = None
+        row = self._method_cache[mkey]
+        if row:
+            return row
         for b in self.class_bases(cls, cls_file):
-            for bf in self._class_files(b, cls_file):
-                hit = self.mro_has_method(b, bf, method, seen)
+            base_name = b.rsplit('.', 1)[-1]
+            for bf in self._base_class_files(b, cls_file):
+                hit = self.mro_has_method(base_name, bf, method, seen)
                 if hit:
                     return hit
         return None
@@ -207,10 +274,28 @@ class Resolver(object):
                 if recv.id == 'self':
                     cls = _enclosing_class_from(idx, line)
                     if cls:
-                        for cf in self._class_files(cls, file):
+                        hits = set()
+                        own_class = self.con.execute(
+                            'SELECT 1 FROM classes WHERE file=? AND name=?',
+                            (file, cls)).fetchone()
+                        class_files = [file] if own_class else self._class_files(cls, file)
+                        for cf in class_files:
                             hit = self.mro_has_method(cls, cf, name)
                             if hit:
-                                return hit
+                                hits.add(hit)
+                        if len(hits) == 1:
+                            return next(iter(hits))
+                        # 组件方法里的 self 在运行时是共同宿主，不是组件实例。
+                        # 仅当所有可行宿主收敛到同一物理定义时确认该边。
+                        for cf in class_files:
+                            for host, host_file in self.runtime_hosts(cls, cf):
+                                if (host, host_file) == (cls, cf):
+                                    continue
+                                hit = self.mro_has_method(host, host_file, name)
+                                if hit:
+                                    hits.add(hit)
+                        if len(hits) == 1:
+                            return next(iter(hits))
                 else:
                     typ = self._local_var_type(idx['tree'], line, recv.id, file,
                                                assigns=idx['assigns'])
@@ -432,12 +517,10 @@ class Resolver(object):
             'SELECT file, name, bases FROM classes').fetchall()
         for child_file, child, bases in rows:
             for base in (bases.split(',') if bases else ()):
-                cands = self._class_files(base, child_file)
-                # 同名基类有歧义时仅接受同文件定义；宁可漏边，不跨镜像误连。
-                if len(cands) == 1:
-                    out.setdefault((base, cands[0]), set()).add((child, child_file))
-                elif child_file in cands:
-                    out.setdefault((base, child_file), set()).add((child, child_file))
+                base_name = base.rsplit('.', 1)[-1]
+                for base_file in self._base_class_files(base, child_file):
+                    out.setdefault((base_name, base_file), set()).add(
+                        (child, child_file))
         self._reverse_bases_cache = out
         return out
 
@@ -485,6 +568,7 @@ class Resolver(object):
                 'line': sln,
                 'caller': '%s %s.%s' % (kind, scls, source),
                 'via_callback': {'kind': kind, 'source': source,
+                                 'source_class': scls,
                                  'target': target,
                                  'hosts': [{'class': h, 'file': hf}
                                            for h, hf in hosts]},
@@ -588,7 +672,7 @@ def _display(cls, func):
 # v8: receiver/handler 事实并入解析；v9: receiver 经 MRO/组件归并目标；
 # v10: 增加符号自动消歧/运行时宿主定义定位与查询相关覆盖问题清单；
 # v11: 运行时宿主的方法解析按直接定义 > 注入组件 > 基类
-RESOLVER_VERSION = 11
+RESOLVER_VERSION = 12
 
 
 # 内置函数/常见运行时名：callees 收集时的噪音过滤
@@ -710,7 +794,8 @@ def resolve_symbol(store, cfg, symbol):
                         for p in parts):
         return {'symbol': raw, 'status': 'invalid', 'selected': None,
                 'candidates': [],
-                'note': '符号格式应为 Func、Class.Func 或 path.py:Class.Func'}
+                'note': ('符号格式应为 Func、Class.Func、path.py:Func 或 '
+                         'path.py:Class.Func')}
     func = parts[-1]
     requested_class = '.'.join(parts[:-1]) or None
     params = [func]
@@ -725,10 +810,20 @@ def resolve_symbol(store, cfg, symbol):
     rows = store.con.execute(sql + ' ORDER BY file,line', params).fetchall()
     candidates = []
     for file, line, cls in rows:
-        candidates.append({
+        item = {
             'file': file, 'line': line, 'class': cls, 'name': func,
+            'source_name': func, 'runtime_name': func,
             'symbol': _display(cls, func), 'via': 'definition',
-        })
+        }
+        aliases = store.con.execute(
+            'SELECT runtime,confidence,reason FROM method_alias '
+            'WHERE file=? AND class IS ? AND source=? ORDER BY runtime',
+            (file, cls, func)).fetchall()
+        if aliases:
+            item['runtime_aliases'] = [
+                {'runtime': runtime, 'confidence': confidence, 'reason': reason}
+                for runtime, confidence, reason in aliases]
+        candidates.append(item)
 
     # 宿主类本身没有物理 def 时，沿通用 MRO/组件图找实际实现。
     if requested_class and cfg is not None:
@@ -742,15 +837,28 @@ def resolve_symbol(store, cfg, symbol):
             if not hit:
                 continue
             row = store.con.execute(
-                'SELECT class FROM defs WHERE file=? AND line=?', hit).fetchone()
-            candidates.append({
+                'SELECT class,name FROM defs WHERE file=? AND line=?', hit).fetchone()
+            source_class = row[0] if row else None
+            source_name = row[1] if row else func
+            candidate = {
                 'file': hit[0], 'line': hit[1],
-                'class': row[0] if row else None, 'name': func,
-                'symbol': _display(row[0] if row else None, func),
+                'class': source_class, 'name': func,
+                'source_name': source_name, 'runtime_name': func,
+                'symbol': _display(source_class, source_name),
                 'via': 'runtime-host',
                 'requested_class': host_class,
                 'host_file': host_file,
-            })
+            }
+            alias = store.con.execute(
+                'SELECT confidence,reason FROM method_alias '
+                'WHERE file=? AND class=? AND source=? AND runtime=?',
+                (hit[0], source_class, source_name, func)).fetchone()
+            if alias:
+                candidate['method_alias'] = {
+                    'source': source_name, 'runtime': func,
+                    'confidence': alias[0], 'reason': alias[1],
+                }
+            candidates.append(candidate)
 
     unique = {}
     for item in candidates:
@@ -782,8 +890,12 @@ def callers_by_symbol(store, cfg, symbol, receiver_class=None):
     resolution = resolve_symbol(store, cfg, symbol)
     selected = resolution['selected']
     if selected is not None:
-        out = callers(store, cfg, selected['file'], selected['name'],
-                      receiver_class=receiver_class)
+        runtime_class = receiver_class or selected.get('requested_class')
+        out = callers(
+            store, cfg, selected['file'], selected.get('source_name', selected['name']),
+            def_line=selected['line'], def_class=selected.get('class'),
+            runtime_name=selected.get('runtime_name', selected['name']),
+            receiver_class=runtime_class)
         out['query'] = {'symbol': symbol, 'receiver_class': receiver_class}
         out['resolution'] = resolution
         return out
@@ -830,21 +942,65 @@ def _receiver_fact_targets(resolver, facts, from_file, func, direct_target=None,
                            direct_class=None):
     """receiver 类型事实 -> 方法定义；继承和组件注入统一走 mro_has_method。"""
     out = []
+    hooks = getattr(resolver.cfg, 'hooks', None)
     for fact in facts:
-        typ = fact[0]
-        hits = set()
-        if direct_target is not None and typ == direct_class:
-            hits.add(direct_target)
-        for cls_file in resolver._class_files(typ, from_file):
-            hit = resolver.mro_has_method(typ, cls_file, func)
-            if hit:
-                hits.add(hit)
-        for hit in sorted(hits):
-            out.append((hit, fact))
+        typ, confidence, reason = fact
+        expanded = (hooks.expand_receiver_type(
+            typ, resolver.store, resolver.cfg, from_file) if hooks else [])
+        concrete_facts = expanded or [(typ, confidence, reason)]
+        for concrete, concrete_confidence, concrete_reason in concrete_facts:
+            hits = set()
+            if direct_target is not None and concrete == direct_class:
+                hits.add(direct_target)
+            for cls_file in resolver._class_files(concrete, from_file):
+                hit = resolver.mro_has_method(concrete, cls_file, func)
+                if hit:
+                    hits.add(hit)
+            for hit in sorted(hits):
+                out.append((hit, (concrete, concrete_confidence,
+                                  concrete_reason)))
     return out
 
 
-def callers(store, cfg, file, func, resolver=None, receiver_class=None):
+def _definition_disambiguation(query, defs, func, t0, store, note):
+    items = [
+        {'level': 'DISAMBIGUATION', 'symbol': _display(cls, func),
+         'file': file, 'line': line, 'caller': _display(cls, func),
+         'note': 'definition'}
+        for file, line, cls in defs
+    ]
+    out = _result(query, items, t0, note=note, store=store,
+                  relevant_files=[row[0] for row in defs],
+                  coverage_symbols=[func])
+    out['resolution'] = {
+        'status': 'ambiguous', 'selected': None,
+        'candidates': items, 'note': note,
+    }
+    return out
+
+
+def _self_call_runtime_compatible(resolver, call_file, call_line, caller_class,
+                                  target_class, target_file,
+                                  requested_class=None):
+    """精确目标查询时，用共同运行时宿主排除已知不相交的 self 同名调用。"""
+    if not caller_class or not target_class:
+        return True
+    call = next((node for node in resolver._file_index(call_file)['calls'].get(
+        call_line, ()) if isinstance(node.func, ast.Attribute)), None)
+    if call is None or dotted(call.func.value) != 'self':
+        return True
+    source_hosts = set()
+    for class_file in resolver._class_files(caller_class, call_file):
+        source_hosts.update(resolver.runtime_hosts(caller_class, class_file))
+    target_hosts = resolver.runtime_hosts(target_class, target_file)
+    if requested_class:
+        target_hosts = {host for host in target_hosts
+                        if host[0] == requested_class}
+    return bool(source_hosts & target_hosts)
+
+
+def callers(store, cfg, file, func, resolver=None, receiver_class=None,
+            def_line=None, def_class=None, runtime_name=None):
     """谁调用 <file> 的 <func>：候选 -> 调用形态过滤 -> 语义验证 -> 分级输出。
 
     resolver 可注入复用（blast 闭包逐函数调用时避免重复全表初始化）。
@@ -852,8 +1008,10 @@ def callers(store, cfg, file, func, resolver=None, receiver_class=None):
     t0 = time.time()
     file = file.replace('\\', '/')
     defs = _find_defs(store, file, func)
-    if receiver_class:
-        defs = [row for row in defs if row[2] == receiver_class]
+    if def_line is not None:
+        defs = [row for row in defs if row[1] == def_line]
+    if def_class is not None:
+        defs = [row for row in defs if row[2] == def_class]
     if not defs:
         note = '定义未找到（文件未索引或函数不存在）'
         row = store.con.execute(
@@ -864,88 +1022,125 @@ def callers(store, cfg, file, func, resolver=None, receiver_class=None):
         return _result({'file': file, 'func': func}, [], t0, note=note,
                        store=store, relevant_files=[file],
                        coverage_symbols=[func])
-    def_file, def_line, def_cls = defs[0]
-    note = ('同名定义 %d 处，取首处' % len(defs)) if len(defs) > 1 else ''
-    cache_kind = 'callers:%s' % (receiver_class or '')
-    cached = _load_edges(store, cfg, func, def_file, def_line, cache_kind)
+    if len(defs) > 1:
+        return _definition_disambiguation(
+            {'file': file, 'func': func, 'receiver_class': receiver_class},
+            defs, func, t0, store,
+            '同文件命中 %d 个同名定义；请使用 path.py:Class.Func 消歧'
+            % len(defs))
+    def_file, target_line, def_cls = defs[0]
+    call_name = runtime_name or func
+    note = ''
+    cache_kind = 'callers:%s:%s' % (receiver_class or '', call_name)
+    cached = _load_edges(store, cfg, call_name, def_file, target_line, cache_kind)
     if cached is not None:
         return _result({'file': file, 'func': func}, cached, t0, cached=True,
                        note=note, store=store,
                        relevant_files=[i['file'] for i in cached] + [def_file],
-                       coverage_symbols=[func])
+                       coverage_symbols=[call_name])
     r = resolver or Resolver(store, cfg)
     items = []
     bad_files = set(store.parse_failed_files())
     cands = store.con.execute(
         'SELECT f.path, n.line FROM names n JOIN files f ON n.file=f.id '
-        'WHERE n.name=? ORDER BY f.path, n.line', (func,)).fetchall()
+        'WHERE n.name=? ORDER BY f.path, n.line', (call_name,)).fetchall()
     all_def_sites = set(store.con.execute(
-        'SELECT file,line FROM defs WHERE name=?', (func,)).fetchall())
+        'SELECT file,line FROM defs WHERE name=?', (call_name,)).fetchall())
     seen = set()
     for (f, ln) in cands:
         if (f, ln) in all_def_sites or (f, ln) in seen:
             continue
-        if not _is_call_form(r, f, ln, func):
+        if not _is_call_form(r, f, ln, call_name):
             continue
         seen.add((f, ln))
         cls, fname = r._enclosing_of(f, ln)
-        got = r.resolve_call(f, ln, func)
-        receiver_facts = _receiver_fact(r, f, ln, func)
+        got = r.resolve_call(f, ln, call_name)
+        receiver_facts = _receiver_fact(r, f, ln, call_name)
         wanted_class = receiver_class or def_cls
         if receiver_facts:
-            target = (def_file, def_line)
+            target = (def_file, target_line)
             matching = [fact for hit, fact in _receiver_fact_targets(
-                r, receiver_facts, f, func,
+                r, receiver_facts, f, call_name,
                 direct_target=target, direct_class=wanted_class)
                 if hit == target]
             if not matching:
                 continue
-            if got != (def_file, def_line):
+            if got != (def_file, target_line):
                 typ, _confidence, reason = matching[0]
                 items.append({
                     'level': 'FRAMEWORK-INFERRED',
-                    'symbol': _display(typ, func), 'file': f, 'line': ln,
+                    'symbol': _display(typ, call_name), 'file': f, 'line': ln,
                     'caller': _display(cls, fname), 'note': reason,
                     'receiver_class': typ,
                 })
                 continue
-        if got == (def_file, def_line):
-            items.append({'level': 'VERIFIED', 'symbol': _display(def_cls, func),
+        if got == (def_file, target_line):
+            items.append({'level': 'VERIFIED', 'symbol': _display(def_cls, call_name),
                           'file': f, 'line': ln, 'caller': _display(cls, fname)})
         elif got is not None:
-            other = store.con.execute(
-                'SELECT class FROM defs WHERE file=? AND line=?', got).fetchone()
-            items.append({'level': 'CANDIDATE', 'symbol': _display(def_cls, func),
-                          'file': f, 'line': ln, 'caller': _display(cls, fname),
-                          'note': '解析到同名另一定义 %s:%d' % got})
+            # 已经精确解析到另一定义时，不再把它包装成目标的同名候选。
+            continue
         elif f in bad_files:
-            items.append({'level': 'CANDIDATE', 'symbol': _display(def_cls, func),
+            if not r._partition_compatible(f, def_file):
+                continue
+            items.append({'level': 'CANDIDATE', 'symbol': _display(def_cls, call_name),
                           'file': f, 'line': ln, 'caller': _display(cls, fname),
                           'note': '所在文件 ast 解析失败，无法验证（索引仅 names）'})
         else:
-            items.append({'level': 'CANDIDATE', 'symbol': _display(def_cls, func),
+            if not r._partition_compatible(f, def_file):
+                continue
+            if not _self_call_runtime_compatible(
+                    r, f, ln, cls, def_cls, def_file, receiver_class):
+                continue
+            items.append({'level': 'CANDIDATE', 'symbol': _display(def_cls, call_name),
                           'file': f, 'line': ln, 'caller': _display(cls, fname),
                           'note': '语义验证不可达（同名候选）'})
-    items.extend(r.convention_sources(def_file, def_line, def_cls, func))
+    items.extend(r.convention_sources(def_file, target_line, def_cls, call_name))
     items.sort(key=lambda i: (i['level'], i['file'], i['line']))
     ref_files = set(i['file'] for i in items) | {def_file}
     for item in items:
         for host in item.get('via_callback', {}).get('hosts', ()):
             ref_files.add(host['file'])
-    _save_edges(store, func, def_file, def_line, cache_kind, items, ref_files)
+    _save_edges(store, call_name, def_file, target_line, cache_kind, items, ref_files)
     return _result({'file': file, 'func': func,
                     'receiver_class': receiver_class}, items, t0,
                    note=note, store=store, relevant_files=ref_files,
-                   coverage_symbols=[func])
+                   coverage_symbols=[call_name])
 
 
-def callees(store, cfg, file, func, def_line=None, resolver=None):
+def callees_by_symbol(store, cfg, symbol):
+    """callees 的统一符号入口；保留物理定义行和运行时别名。"""
+    t0 = time.time()
+    resolution = resolve_symbol(store, cfg, symbol)
+    selected = resolution['selected']
+    if selected is None:
+        out = _definition_disambiguation(
+            {'symbol': symbol},
+            [(item['file'], item['line'], item.get('class'))
+             for item in resolution['candidates']],
+            symbol.rsplit('.', 1)[-1], t0, store, resolution['note'])
+        out['resolution'] = resolution
+        return out
+    out = callees(
+        store, cfg, selected['file'],
+        selected.get('source_name', selected['name']),
+        def_line=selected['line'], def_class=selected.get('class'),
+        runtime_name=selected.get('runtime_name', selected['name']))
+    out['query'] = {'symbol': symbol}
+    out['resolution'] = resolution
+    return out
+
+
+def callees(store, cfg, file, func, def_line=None, resolver=None,
+            def_class=None, runtime_name=None):
     """<file> 的 <func> 调了谁：定位函数体 -> 收集调用点 -> 逐个反向解析。"""
     t0 = time.time()
     file = file.replace('\\', '/')
     defs = _find_defs(store, file, func)
     if def_line is not None:
         defs = [row for row in defs if row[1] == def_line]
+    if def_class is not None:
+        defs = [row for row in defs if row[2] == def_class]
     if not defs:
         note = '定义未找到（文件未索引或函数不存在）'
         row = store.con.execute(
@@ -955,14 +1150,19 @@ def callees(store, cfg, file, func, def_line=None, resolver=None):
         return _result({'file': file, 'func': func}, [], t0, note=note,
                        store=store, relevant_files=[file],
                        coverage_symbols=[func])
-    def_file, def_line, def_cls = defs[0]
+    if len(defs) > 1:
+        return _definition_disambiguation(
+            {'file': file, 'func': func}, defs, func, t0, store,
+            '同文件命中 %d 个同名定义；请使用 path.py:Class.Func 消歧'
+            % len(defs))
+    def_file, target_line, def_cls = defs[0]
     r = resolver or Resolver(store, cfg)
     tree = r._parse(def_file)
     items = []
     if tree is not None:
         fn_node = None
         for n in ast.walk(tree):
-            if isinstance(n, FUNC_NODES) and n.name == func and n.lineno == def_line:
+            if isinstance(n, FUNC_NODES) and n.name == func and n.lineno == target_line:
                 fn_node = n
                 break
         if fn_node is not None:
@@ -1012,14 +1212,39 @@ def callees(store, cfg, file, func, def_line=None, resolver=None):
                     continue
                 got_defs.add(got)
                 row = store.con.execute(
-                    'SELECT class FROM defs WHERE file=? AND line=?', got).fetchone()
-                items.append({'level': 'VERIFIED', 'symbol': _display(row[0] if row else None,
-                                                                     cname),
+                    'SELECT class,name FROM defs WHERE file=? AND line=?', got).fetchone()
+                items.append({'level': 'VERIFIED',
+                              'symbol': _display(row[0] if row else None,
+                                                 row[1] if row else cname),
                               'file': got[0], 'line': got[1],
                               'caller': '%s:%d' % (def_file, call.lineno)})
-    note = ('同名定义 %d 处，取首处' % len(defs)) if len(defs) > 1 else ''
+    callback_rows = r.con.execute(
+        'SELECT file,line,class,kind,source,target FROM callback_raw '
+        'WHERE file=? AND class IS ? AND source=? ORDER BY line',
+        (def_file, def_cls, func)).fetchall()
+    got_defs = set((item['file'], item['line']) for item in items
+                   if item['level'] != 'CANDIDATE')
+    for raw in callback_rows:
+        for callback in r.convention_targets(raw):
+            target = (callback['target_file'], callback['target_line'])
+            if target in got_defs:
+                continue
+            got_defs.add(target)
+            items.append({
+                'level': '%s-INFERRED' % callback['kind'].upper(),
+                'symbol': _display(callback['target_class'], callback['target']),
+                'file': callback['target_file'],
+                'line': callback['target_line'],
+                'caller': '%s:%d' % (def_file, callback['source_line']),
+                'via_callback': {
+                    'kind': callback['kind'], 'source': callback['source'],
+                    'source_class': callback['source_class'],
+                    'target': callback['target'], 'hosts': callback['hosts'],
+                },
+            })
+    note = ''
     items.sort(key=lambda i: (i['level'], i['symbol']))
-    return _result({'file': file, 'func': func}, items, t0, note=note,
+    return _result({'file': file, 'func': runtime_name or func}, items, t0, note=note,
                    store=store,
                    relevant_files=[def_file] + [i['file'] for i in items],
                    coverage_symbols=[func])
@@ -1052,20 +1277,22 @@ def usages(store, cfg, symbol, limit=200):
                    coverage_symbols=[symbol])
 
 
-def defs(store, symbol, limit=200):
-    """精确定义查询；不混入普通 identifier 出现点。"""
+def defs(store, symbol, limit=200, cfg=None):
+    """用统一符号解析器查询定义；不混入普通 identifier 出现点。"""
     t0 = time.time()
-    if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', symbol):
-        return _result({'symbol': symbol}, [], t0,
-                       note='defs 只接受单个 Python 标识符', store=store,
-                       coverage_symbols=[symbol])
-    rows = store.con.execute(
-        'SELECT file,line,class FROM defs WHERE name=? ORDER BY file,line LIMIT ?',
-        (symbol, limit)).fetchall()
+    resolution = resolve_symbol(store, cfg, symbol)
+    candidates = resolution['candidates'][:limit]
     items = [
-        {'level': 'DEFINITION', 'symbol': _display(cls, symbol),
-         'file': file, 'line': line, 'caller': _display(cls, symbol)}
-        for file, line, cls in rows]
-    return _result({'symbol': symbol}, items, t0, store=store,
+        {'level': 'DEFINITION', 'symbol': item['symbol'],
+         'file': item['file'], 'line': item['line'],
+         'caller': item['symbol'], 'via': item.get('via'),
+         'source_name': item.get('source_name'),
+         'runtime_name': item.get('runtime_name'),
+         'requested_class': item.get('requested_class')}
+        for item in candidates]
+    out = _result({'symbol': symbol}, items, t0,
+                   note=resolution['note'], store=store,
                    relevant_files=[i['file'] for i in items],
-                   coverage_symbols=[symbol])
+                   coverage_symbols=[symbol.rsplit('.', 1)[-1]])
+    out['resolution'] = resolution
+    return out

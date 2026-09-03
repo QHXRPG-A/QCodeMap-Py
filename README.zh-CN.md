@@ -133,12 +133,18 @@ python -m qcodemap callers src/logic/avatar.py GetTeammateInfo
 
 ```bash
 python -m qcodemap callers src/logic/avatar.py GetTeammateInfo  # 谁调用它
+python -m qcodemap callers src/logic/avatar.py:Avatar.GetTeammateInfo
 python -m qcodemap callers src/logic/avatar.py Activate --receiver-class FestivalTargetEntity
-python -m qcodemap callees src/logic/avatar.py RefreshToplogo   # 它调了谁
+python -m qcodemap callees Avatar.RefreshToplogo                # 单符号入口
+python -m qcodemap callees src/logic/avatar.py RefreshToplogo   # 兼容 file + func
 python -m qcodemap usages HasSkywing                            # 标识符全仓出现点
-python -m qcodemap defs HasSkywing                              # 定义点
+python -m qcodemap defs src/logic/avatar.py:Avatar.HasSkywing   # 限定定义点
 python -m qcodemap diagnose                                     # custom 项目诊断
 ```
+
+`callers`、`callees`、`defs`、`path` 统一接受 `Func`、`Class.Func`、
+`path.py:Func`、`path.py:Class.Func`。旧式 `callees file.py Func` 若在同文件
+命中多个同名定义，会返回消歧候选，不再静默选择第一处。
 
 ### RPC 与事件双端配对
 
@@ -281,8 +287,8 @@ docs/         深入文档（见下）
 
 ## 维护约定
 
-- 改动后必跑公开自包含回归：`python tests/test_p4.py` 与
-  `python tests/test_p5.py`；本地工作区有试点代码库与项目档案时，再跑完整项目回归
+- 改动后必跑公开自包含回归：`python tests/test_p4.py` 至
+  `python tests/test_p8.py`；本地工作区有试点代码库与项目档案时，再跑完整项目回归
 - 解析器行为变更必须 `RESOLVER_VERSION + 1`（resolve.py 顶部），旧缓存自动失效；
   存储结构变更必须 `SCHEMA_VERSION + 1`（store.py 顶部）并 `--rebuild`
 - 新框架语义一律写进 `custom/facts.py` 钩子，核心包不认识任何框架名

@@ -460,7 +460,9 @@ def _impact_closure(store, cfg, funcs, depth, callbacks=None):
                 except (TypeError, ValueError):
                     snapshot_items = ()
                 for item in snapshot_items:
-                    if item.get('level') != 'VERIFIED':
+                    level_name = item.get('level', '')
+                    if (level_name != 'VERIFIED'
+                            and not level_name.endswith('-INFERRED')):
                         continue
                     key = (item['file'], item['line'])
                     if key in seen_direct:
@@ -536,7 +538,8 @@ def _impact_closure(store, cfg, funcs, depth, callbacks=None):
             out = rmod.callers(store, cfg, fn['file'], fn['func'], resolver=resolver)
         if out is not None:
             for item in out['items']:
-                if item['level'] != 'VERIFIED':
+                if (item['level'] != 'VERIFIED'
+                        and not item['level'].endswith('-INFERRED')):
                     continue
                 n_edges += 1
                 if n_edges > MAX_EDGES:
@@ -567,7 +570,18 @@ def _impact_closure(store, cfg, funcs, depth, callbacks=None):
                                           % (item['file'], item['line'], item['caller']),
                             'via': entry['target']})
                 # 调用点外层函数：查其真实定义（class+name 维度）后继续向上
-                caller_cls, caller_func = _split_display(item['caller'])
+                callback = item.get('via_callback') or {}
+                if callback:
+                    caller_cls = callback.get('source_class')
+                    caller_func = callback.get('source')
+                    exists = store.con.execute(
+                        'SELECT 1 FROM defs WHERE file=? AND class IS ? '
+                        'AND name=? LIMIT 1',
+                        (item['file'], caller_cls, caller_func)).fetchone()
+                    if not exists:
+                        caller_func = None
+                else:
+                    caller_cls, caller_func = _split_display(item['caller'])
                 if not caller_func:
                     continue
                 enqueue({'class': caller_cls, 'func': caller_func, 'file': item['file']},

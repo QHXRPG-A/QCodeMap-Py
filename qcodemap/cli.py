@@ -95,8 +95,10 @@ def main(argv=None):
                            help='限定 receiver 类型证据')
 
     p_callees = sub.add_parser('callees', help='这个函数调了谁')
-    for arg in ('file', 'func'):
-        p_callees.add_argument(arg)
+    p_callees.add_argument(
+        'target', help='符号名，或兼容旧用法时的函数所在文件（相对 root）')
+    p_callees.add_argument(
+        'func', nargs='?', help='兼容旧用法：与前一个 file 参数配对的函数名')
     p_callees.add_argument('--root', default=None)
     p_callees.add_argument('--db', default=None)
     p_callees.add_argument('--json', action='store_true')
@@ -410,9 +412,12 @@ def main(argv=None):
                 out = resolve.callers(store, cfg, args.target, args.func,
                                       receiver_class=args.receiver_class)
         elif args.cmd == 'callees':
-            out = resolve.callees(store, cfg, args.file, args.func)
+            if args.func is None:
+                out = resolve.callees_by_symbol(store, cfg, args.target)
+            else:
+                out = resolve.callees(store, cfg, args.target, args.func)
         elif args.cmd == 'defs':
-            out = resolve.defs(store, args.symbol, limit=args.limit)
+            out = resolve.defs(store, args.symbol, limit=args.limit, cfg=cfg)
         else:
             out = resolve.usages(store, cfg, args.symbol, limit=args.limit)
     finally:

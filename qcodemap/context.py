@@ -83,10 +83,17 @@ def get_file_context(store, cfg, file, json_out=True):
     attr = [{'class': c, 'attr': a, 'type': t} for (c, a, t) in store.con.execute(
         'SELECT class, attr, type FROM attr WHERE file=? ORDER BY class, attr',
         (file,))]
-    comps = [{'host': h, 'host_file': hf, 'comp': cp, 'comp_file': cf}
-             for (h, hf, cp, cf) in store.con.execute(
-                 'SELECT host, host_file, comp, comp_file FROM comp WHERE comp_file=? '
-                 'ORDER BY host', (file,))]
+    comps = [{'host': h, 'host_file': hf, 'comp': cp, 'comp_file': cf,
+              'position': position}
+             for (h, hf, cp, cf, position) in store.con.execute(
+                 'SELECT host,host_file,comp,comp_file,position FROM comp '
+                 'WHERE comp_file=? ORDER BY host_file,host,position', (file,))]
+    method_aliases = [
+        {'class': cls, 'source': source, 'runtime': runtime,
+         'confidence': confidence, 'reason': reason}
+        for cls, source, runtime, confidence, reason in store.con.execute(
+            'SELECT class,source,runtime,confidence,reason FROM method_alias '
+            'WHERE file=? ORDER BY class,source,runtime', (file,))]
     callbacks = [
         {'line': ln, 'class': cls, 'kind': kind, 'source': source,
          'target': target}
@@ -104,7 +111,7 @@ def get_file_context(store, cfg, file, json_out=True):
         'importers': importers, 'importer_count': len(importers),
         'hub': is_hub, 'importers_indegree': n_imp,
         'facts': {'attr': attr, 'comp_register': comps,
-                  'callbacks': callbacks},
+                  'method_aliases': method_aliases, 'callbacks': callbacks},
         'coverage': cov,
         'elapsed': round(time.time() - t0, 3),
     }

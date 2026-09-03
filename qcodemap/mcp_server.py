@@ -129,7 +129,12 @@ def _tool_callees(args):
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store.open_reader(cfg.db_path)
     try:
-        out = rmod.callees(store, cfg, args['file'], args['func'])
+        if args.get('symbol'):
+            out = rmod.callees_by_symbol(store, cfg, args['symbol'])
+        elif args.get('file') and args.get('func'):
+            out = rmod.callees(store, cfg, args['file'], args['func'])
+        else:
+            raise ValueError('callees 需要 symbol，或 file + func')
     finally:
         store.close()
     return freshness_mod.attach_index(out, index)
@@ -328,7 +333,8 @@ def _tool_defs(args):
     index = freshness_mod.ensure_fresh(cfg, mode='auto', throttle_seconds=1.0)
     store = Store.open_reader(cfg.db_path)
     try:
-        out = rmod.defs(store, args['symbol'], limit=int(args.get('limit', 200)))
+        out = rmod.defs(store, args['symbol'], limit=int(args.get('limit', 200)),
+                        cfg=cfg)
     finally:
         store.close()
     return freshness_mod.attach_index(out, index)
@@ -358,8 +364,9 @@ _TOOLS = [
         'name': 'qcodemap_callers',
         'description': '谁调用这个函数；可直接传 symbol，唯一时自动定位，歧义时返回候选。',
         'inputSchema': {'type': 'object',
-                        'properties': {'symbol': {'type': 'string',
+                                       'properties': {'symbol': {'type': 'string',
                                                   'description': 'Func/Class.Func/'
+                                                                 'path.py:Func/'
                                                                  'path.py:Class.Func'},
                                        'file': {'type': 'string',
                                                 'description': '函数所在文件（相对项目根）'},
@@ -374,11 +381,16 @@ _TOOLS = [
     },
     {
         'name': 'qcodemap_callees',
-        'description': '这个函数调了谁（反向调用链）。',
+        'description': '这个函数调了谁；可传统一 symbol 或兼容的 file + func。',
         'inputSchema': {'type': 'object',
-                        'properties': {'file': {'type': 'string'},
+                        'properties': {'symbol': {'type': 'string',
+                                                  'description': 'Func/Class.Func/'
+                                                                 'path.py:Class.Func'},
+                                       'file': {'type': 'string'},
                                        'func': {'type': 'string'}},
-                        'required': ['file', 'func']},
+                        'required': [],
+                        'anyOf': [{'required': ['symbol']},
+                                  {'required': ['file', 'func']}]},
         'handler': _tool_callees,
     },
     {

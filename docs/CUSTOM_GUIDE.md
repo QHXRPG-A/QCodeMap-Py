@@ -34,7 +34,7 @@ NAMES_DOWNSAMPLE_PREFIXES = ['src/generated_tables/']
 ### 1.2 custom/facts.py —— 框架习语钩子（可选）
 
 没有框架习语就删掉此文件，只剩通用事实（self.X=构造、return 构造）。
-有的话继承 `qcodemap.hooks.FactsHooks` 覆写需要的钩子（全部 13 个见 §3，
+有的话继承 `qcodemap.hooks.FactsHooks` 覆写需要的钩子（全部 18 个见 §3，
 常用四个起步：assign_value_type/class_facts/class_stmt_fact/rpc_facts）。
 
 ### 1.3 custom/seeds.py —— 人工种子（可选）
@@ -62,13 +62,13 @@ custom 文件按路径 importlib 动态加载（`qcodemap_custom_config` 等模�
 缺失哪个文件就用哪个默认——所以五个文件全部可选（ui_profile/tbui_index
 仅 ui-refs 需要，见 §7）。
 
-## 3. 扩展框架语义：FactsHooks 十四个钩子
+## 3. 扩展框架语义：FactsHooks 十八个钩子
 
 先在目标代码里确认习语的真实形态（`grep -n` 看实际写法），再实现。
-协议全貌见 `qcodemap/hooks.py`；下面列常用八个（其余六个：
-receiver_type_facts、handler_facts、endpoint_aliases、project_diagnostics
-见 hooks.py docstring，
-ui_facts/build_done 见 §7）：
+协议全貌见 `qcodemap/hooks.py`；下面列常用钩子。动态方法改名、注册回调、
+伪类型展开和端侧隔离分别使用 `method_alias_facts`、
+`call_callback_facts`、`expand_receiver_type`、`file_partition`；
+UI 的 `ui_facts/build_done` 见 §7，其余签名以 hooks.py docstring 为准：
 
 ```python
 from qcodemap.hooks import FactsHooks, FactContext
@@ -117,8 +117,9 @@ class MyFacts(FactsHooks):
 事实行必须与 store 表列一致：
 - `attr`：`(rel, class, attr_name, type_name)`
 - `global_assign`：`(base_name, attr, class, rel)`
-- `comp_raw`：`(rel, host, kind, value)`，kind ∈ ref/attr/importall
-  （ref=同文件/裸名；attr=mod.Cls 前缀；importall=*pkg.importall() 星调用）
+- `comp_raw`：存储为 `(rel, host, position, kind, value)`；class_facts 可返回
+  `(rel, host, kind, value)`，scanner 按返回顺序补 position。kind ∈
+  ref/attr/importall（ref=同文件/裸名；attr=mod.Cls；importall=星号展开）
 - `binding`：`(rel,line,domain,owner,relation,target,variant,confidence,reason)`；
   `module_bindings` 返回除 rel 外的八项，owner 在 domain 内应稳定唯一
 - `rpc`：`(rel, line, chan, method, stub)`（stub 可 None；由 rpc_facts
@@ -126,7 +127,8 @@ class MyFacts(FactsHooks):
 - `pubsub`：`(rel, line, side, event, func, cls)`（由 pubsub_facts 钩子
   产出 (side, event)，scanner 补定位列与所在函数/类）
 - `callback_raw`：`(rel, line, class, kind, source, target)`（由
-  callback_facts 产出后三项，scanner 补声明定位与所在类）
+  callback_facts 或 call_callback_facts 产出后三项，scanner 补定位与所在类）
+- `method_alias`：`(rel,class,source,runtime,confidence,reason)`
 
 ### 3.1 字符串分发 RPC 的分发表写法
 

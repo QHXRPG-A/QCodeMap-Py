@@ -46,9 +46,9 @@ when Git ignores them; they may be the active project profile.
 | Need | Preferred route |
 | --- | --- |
 | Exact text, event string, resource name, or unknown symbol | Start with `rg` |
-| Definition or all identifier occurrences | `defs` / `usages` |
+| Definition or all identifier occurrences | `defs` / `usages` (`usages` only accepts one identifier) |
 | Verified callers or callees | `callers` / `callees` |
-| Unknown file for a known symbol | `callers Class.Func` (auto-locate or candidates) |
+| Unknown file for a known symbol | `callers Class.Func` or `callees Class.Func` (auto-locate or candidates) |
 | Ambiguous receiver type | `callers --receiver-class <Class>` |
 | String-dispatched RPC or event endpoints | `rpc-refs` / `pubsub-refs` |
 | Cross-boundary call route | `path --from Class.Func --to Endpoint.Handle` |
@@ -132,12 +132,16 @@ Subclass `FactsHooks` and override only the required methods:
 | --- | --- |
 | `assign_value_type` | Type evidence for assignments |
 | `class_facts` | Component/injection facts from class decorators |
+| `method_alias_facts` | Physical source method to runtime method-name rewrites |
 | `class_stmt_fact` | Attribute or global-assignment facts from class statements |
 | `importall_members` | Project naming convention for imported components |
 | `rpc_facts` | String-dispatched RPC calls |
 | `pubsub_facts` | Event publishers and subscribers |
 | `callback_facts` | Declarative callback relationships |
+| `call_callback_facts` | Registered bound-method callbacks in function bodies |
 | `receiver_type_facts` | Receiver type evidence at a call site |
+| `expand_receiver_type` | Query-time expansion of project pseudo-types |
+| `file_partition` | Client/server or other resolver partitions |
 | `handler_facts` | RPC handler direction, endpoint, and confidence |
 | `endpoint_aliases` | Equivalent cross-end or runtime endpoint names |
 | `project_diagnostics` | Project-specific consistency issues |
@@ -231,7 +235,7 @@ project's field names or symmetry rules.
 5. Run `diagnose` before and after a fixture fix when adding a diagnostic.
 6. Modify, add, and delete a temporary file; confirm `auto`, `check`, and `off`
    behave differently as documented.
-7. Run `python tests/test_p4.py` and `python tests/test_p5.py` for core changes.
+7. Run `python tests/test_p4.py` through `python tests/test_p8.py` for core changes.
 8. Run project-local regressions when local custom files are available.
 9. Increment `RESOLVER_VERSION` for resolver behavior changes and
    `SCHEMA_VERSION` for storage changes.

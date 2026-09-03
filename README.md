@@ -158,13 +158,20 @@ python -m qcodemap callers src/logic/avatar.py GetTeammateInfo
 ```bash
 python -m qcodemap callers src/logic/avatar.py GetTeammateInfo  # Who calls it?
 python -m qcodemap callers Avatar.GetTeammateInfo                # Auto-locate; list candidates if ambiguous
+python -m qcodemap callers src/logic/avatar.py:Avatar.GetTeammateInfo
 python -m qcodemap callers src/logic/avatar.py Activate --receiver-class FestivalTargetEntity
-python -m qcodemap callees src/logic/avatar.py RefreshToplogo   # What does it call?
+python -m qcodemap callees Avatar.RefreshToplogo                # Single-symbol form
+python -m qcodemap callees src/logic/avatar.py RefreshToplogo   # Legacy file + func form
 python -m qcodemap path --from Avatar.Start --to Endpoint.Handle # Shortest call + RPC path
 python -m qcodemap usages HasSkywing                            # Identifier occurrences
-python -m qcodemap defs HasSkywing                              # Definitions
+python -m qcodemap defs src/logic/avatar.py:Avatar.HasSkywing   # Qualified definition
 python -m qcodemap diagnose                                     # Project diagnostics from custom hooks
 ```
+
+`callers`, `callees`, `defs`, and `path` share the same symbol grammar:
+`Func`, `Class.Func`, `path.py:Func`, or `path.py:Class.Func`. A legacy
+`callees file.py Func` query that matches multiple definitions returns explicit
+disambiguation candidates instead of selecting the first definition.
 
 ### RPC and event endpoint pairing
 
@@ -314,7 +321,7 @@ custom/       Project layer: config.py (scope) / facts.py (framework hooks) /
               README.md only.
 skill/        Bundled qcodemap-agent onboarding skill for repository navigation
               and sanitized custom integration guidance.
-tests/        Self-contained regressions (test_p4 through test_p7 create temporary
+tests/        Self-contained regressions (test_p4 through test_p8 create temporary
               repositories). Pilot-project regressions and custom profiles stay
               in the local workspace and are not published.
 cache/        Rebuildable index artifacts (about 220MB in the pilot; not tracked)
@@ -332,7 +339,7 @@ docs/         In-depth documentation
 ## Maintenance
 
 - Run the public self-contained regressions after every change:
-  `python tests/test_p4.py` through `python tests/test_p7.py`. When the pilot
+  `python tests/test_p4.py` through `python tests/test_p8.py`. When the pilot
   repository and its local project profile are available, run the full local
   regression suite as well.
 - Increment `RESOLVER_VERSION` at the top of `resolve.py` whenever resolver

@@ -11,7 +11,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 DDL = '''
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -34,9 +34,16 @@ CREATE INDEX IF NOT EXISTS idx_attr_class ON attr(class);
 CREATE TABLE IF NOT EXISTS global_assign(base TEXT, attr TEXT, class TEXT, file TEXT);
 CREATE INDEX IF NOT EXISTS idx_global ON global_assign(base, attr);
 CREATE TABLE IF NOT EXISTS ret(module TEXT, func TEXT, type TEXT, file TEXT);
-CREATE TABLE IF NOT EXISTS comp_raw(file TEXT, host TEXT, kind TEXT, value TEXT);
-CREATE TABLE IF NOT EXISTS comp(host TEXT, host_file TEXT, comp TEXT, comp_file TEXT);
+CREATE TABLE IF NOT EXISTS comp_raw(
+    file TEXT, host TEXT, position INT, kind TEXT, value TEXT);
+CREATE TABLE IF NOT EXISTS comp(
+    host TEXT, host_file TEXT, comp TEXT, comp_file TEXT, position INT);
 CREATE INDEX IF NOT EXISTS idx_comp_host ON comp(host);
+CREATE TABLE IF NOT EXISTS method_alias(
+    file TEXT, class TEXT, source TEXT, runtime TEXT,
+    confidence TEXT, reason TEXT);
+CREATE INDEX IF NOT EXISTS idx_method_alias_runtime
+    ON method_alias(class, runtime, file);
 CREATE TABLE IF NOT EXISTS rpc(file TEXT, line INT, chan TEXT, method TEXT, stub TEXT);
 CREATE INDEX IF NOT EXISTS idx_rpc_method ON rpc(method);
 CREATE INDEX IF NOT EXISTS idx_rpc_file ON rpc(file);
@@ -78,7 +85,7 @@ CREATE TABLE IF NOT EXISTS edges(
 
 # file 列直接存路径、可直接级联删除的表（names 走 file_id 单独处理）
 CASCADE_TABLES = ('defs', 'classes', 'imports', 'attr', 'global_assign',
-                  'comp_raw', 'ret', 'rpc', 'receiver_fact', 'rpc_handler',
+                  'comp_raw', 'method_alias', 'ret', 'rpc', 'receiver_fact', 'rpc_handler',
                   'endpoint_alias', 'pubsub', 'callback_raw', 'ui_binding',
                   'binding')
 
@@ -183,7 +190,7 @@ class Store(object):
                                  [(n, fid, ln, col) for (n, ln, col) in rows['names']])
         # 其余事实表行 = 完整表行；列数以 DDL 为准，按首行宽度生成占位符
         for table in ('defs', 'classes', 'imports', 'attr',
-                      'global_assign', 'ret', 'comp_raw', 'rpc',
+                      'global_assign', 'ret', 'comp_raw', 'method_alias', 'rpc',
                       'receiver_fact', 'rpc_handler', 'endpoint_alias',
                       'pubsub', 'callback_raw', 'ui_binding', 'binding'):
             data = rows.get(table)

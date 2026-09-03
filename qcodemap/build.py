@@ -149,7 +149,7 @@ def collect_files(cfg):
 
 
 _ALL_TABLES = ('meta', 'files', 'names', 'defs', 'classes', 'imports', 'attr',
-               'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'pubsub',
+               'global_assign', 'ret', 'comp_raw', 'comp', 'method_alias', 'rpc', 'pubsub',
                'receiver_fact', 'rpc_handler', 'endpoint_alias',
                'callback_raw', 'ui_binding', 'binding', 'edges')
 
@@ -305,7 +305,7 @@ def _build(cfg, rebuild=False, verbose=True, scope_rels=None, vacuum=False):
         if n_new or n_upd or n_del:
             store.con.execute('DELETE FROM comp')
             for row in _resolve_comps(store, cfg):
-                store.con.execute('INSERT INTO comp VALUES(?,?,?,?)', row)
+                store.con.execute('INSERT INTO comp VALUES(?,?,?,?,?)', row)
         stages['pass2'] = round(time.time() - phase_t0, 3)
         progress('pass2', force=True)
         store.set_meta('built_at', str(int(time.time())))
@@ -367,7 +367,7 @@ def _build(cfg, rebuild=False, verbose=True, scope_rels=None, vacuum=False):
 
 def _drop_all(store):
     for table in ('files', 'names', 'defs', 'classes', 'imports', 'attr',
-                  'global_assign', 'ret', 'comp_raw', 'comp', 'rpc', 'pubsub',
+                  'global_assign', 'ret', 'comp_raw', 'comp', 'method_alias', 'rpc', 'pubsub',
                   'receiver_fact', 'rpc_handler', 'endpoint_alias', 'callback_raw',
                   'ui_binding', 'binding', 'edges'):
         store.con.execute('DELETE FROM %s' % table)
@@ -409,7 +409,7 @@ def drift_check(store, cfg, rels, cap=DRIFT_CHECK_CAP):
 # ---- pass2: comp_raw -> comp ----
 
 def _resolve_comps(store, cfg):
-    """组件注入原始行 -> (host, host_file, comp_class, comp_file) 集合。
+    """组件注入原始行 -> 有稳定覆盖顺序的组件边。
 
     ref:  同文件类或 import 名字指向的模块；
     attr: mod.Cls 形态，按 import 前缀定位文件；
@@ -420,26 +420,40 @@ def _resolve_comps(store, cfg):
     mods = {scanner.module_of(rel): rel
             for (rel,) in con.execute('SELECT path FROM files')}
     hooks = cfg.hooks
-    out = set()
-    for (file, host, kind, value) in con.execute(
-            'SELECT file, host, kind, value FROM comp_raw').fetchall():
+    out = []
+    seen = set()
+    positions = {}
+
+    def add(host, host_file, comp, comp_file):
+        key = (host, host_file, comp, comp_file)
+        if key in seen:
+            return
+        seen.add(key)
+        host_key = (host, host_file)
+        position = positions.get(host_key, 0)
+        positions[host_key] = position + 1
+        out.append((host, host_file, comp, comp_file, position))
+
+    for (file, host, _position, kind, value) in con.execute(
+            'SELECT file, host, position, kind, value FROM comp_raw '
+            'ORDER BY file, host, position, rowid').fetchall():
         if kind == 'ref':
             hit = con.execute('SELECT 1 FROM classes WHERE file=? AND name=?',
                               (file, value)).fetchone()
             if hit:
-                out.add((host, file, value, file))
+                add(host, file, value, file)
                 continue
             for f in _import_target_files(con, mods, file, value):
                 if con.execute('SELECT 1 FROM classes WHERE file=? AND name=?',
                                (f, value)).fetchone():
-                    out.add((host, file, value, f))
+                    add(host, file, value, f)
                     break
         elif kind == 'attr':
             base, cls = value.rsplit('.', 1)
             for f in _import_target_files(con, mods, file, base):
                 if con.execute('SELECT 1 FROM classes WHERE file=? AND name=?',
                                (f, cls)).fetchone():
-                    out.add((host, file, cls, f))
+                    add(host, file, cls, f)
                     break
         elif kind == 'importall':
             pkg_mod = _resolve_module(con, mods, file, value)
@@ -473,8 +487,8 @@ def _resolve_comps(store, cfg):
                 for mname in member_names:
                     if con.execute('SELECT 1 FROM classes WHERE file=? AND name=?',
                                    (rel2, mname)).fetchone():
-                        out.add((host, file, mname, rel2))
-    return sorted(out)
+                        add(host, file, mname, rel2)
+    return out
 
 
 def _import_target_files(con, mods, from_file, name):
